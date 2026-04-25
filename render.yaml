@@ -3,7 +3,7 @@ services:
     name: shopify-mcp-server
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: python -m shopify_mcp_server.server sse
+    startCommand: python src/shopify_mcp_server/server.py sse
     envVars:
       - key: SHOPIFY_SHOP_URL
         sync: false
