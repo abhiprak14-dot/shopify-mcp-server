@@ -35,7 +35,7 @@ def format_customer_for_ads(c):
         f"Country: {addr.country if addr else 'N/A'}\n"
         f"Total Spent: ${c.total_spent}\n"
         f"Orders Count: {c.orders_count}\n"
-        f"Accepts Marketing: {c.accepts_marketing}\n"
+        f"Accepts Marketing: {getattr(c, 'accepts_marketing', getattr(c, 'email_marketing_consent', 'N/A'))}\n"
         f"Tags: {c.tags}\n"
         f"Created At: {c.created_at}\n"
         f"---"
@@ -217,7 +217,7 @@ async def handle_call_tool(name, arguments):
             total_orders = len(orders)
             buyers = [c for c in customers if int(c.orders_count) > 0]
             repeat_buyers = [c for c in customers if int(c.orders_count) >= 2]
-            marketing_opted = [c for c in customers if c.accepts_marketing]
+            marketing_opted = [c for c in customers if getattr(c, 'accepts_marketing', False) or getattr(c, 'email_marketing_consent', None)]
             summary = (
                 f"=== Neolook Store Revenue Summary ===\n\n"
                 f"Total Customers: {total_customers}\n"
