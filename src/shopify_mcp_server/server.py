@@ -8,6 +8,7 @@ from mcp.server.sse import SseServerTransport
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.requests import Request
+from starlette.responses import JSONResponse
 import uvicorn
 import os
 import sys
@@ -25,113 +26,187 @@ def init_shopify():
 
 def format_customer_for_ads(c):
     addr = getattr(c, 'default_address', None)
-    return (
-        f"ID: {c.id}\n"
-        f"Name: {getattr(c, 'first_name', 'N/A')} {getattr(c, 'last_name', 'N/A')}\n"
-        f"Email: {getattr(c, 'email', 'N/A')}\n"
-        f"Phone: {getattr(c, 'phone', 'N/A')}\n"
-        f"City: {getattr(addr, 'city', 'N/A') if addr else 'N/A'}\n"
-        f"State: {getattr(addr, 'province', 'N/A') if addr else 'N/A'}\n"
-        f"Country: {getattr(addr, 'country', 'N/A') if addr else 'N/A'}\n"
-        f"Total Spent: ${getattr(c, 'total_spent', '0.00')}\n"
-        f"Orders Count: {getattr(c, 'orders_count', 0)}\n"
-        f"Accepts Marketing: {getattr(c, 'accepts_marketing', getattr(c, 'email_marketing_consent', 'N/A'))}\n"
-        f"Tags: {getattr(c, 'tags', 'N/A')}\n"
-        f"Created At: {getattr(c, 'created_at', 'N/A')}\n"
-        f"---"
-    )
+    return {
+        "id": c.id,
+        "name": f"{getattr(c, 'first_name', 'N/A')} {getattr(c, 'last_name', 'N/A')}",
+        "email": getattr(c, 'email', 'N/A'),
+        "phone": getattr(c, 'phone', 'N/A'),
+        "city": getattr(addr, 'city', 'N/A') if addr else 'N/A',
+        "state": getattr(addr, 'province', 'N/A') if addr else 'N/A',
+        "country": getattr(addr, 'country', 'N/A') if addr else 'N/A',
+        "total_spent": getattr(c, 'total_spent', '0.00'),
+        "orders_count": getattr(c, 'orders_count', 0),
+        "accepts_marketing": getattr(c, 'accepts_marketing', getattr(c, 'email_marketing_consent', 'N/A')),
+        "tags": getattr(c, 'tags', 'N/A'),
+        "created_at": getattr(c, 'created_at', 'N/A'),
+    }
 
 def format_order(o):
-    items = ', '.join([i.title for i in o.line_items]) if o.line_items else 'N/A'
-    return (
-        f"Order ID: {o.id}\n"
-        f"Order Number: {o.order_number}\n"
-        f"Email: {getattr(o, 'email', 'N/A')}\n"
-        f"Total: ${o.total_price}\n"
-        f"Financial Status: {o.financial_status}\n"
-        f"Fulfillment Status: {getattr(o, 'fulfillment_status', 'N/A')}\n"
-        f"Items: {items}\n"
-        f"Source: {getattr(o, 'referring_site', 'N/A')}\n"
-        f"Created At: {o.created_at}\n"
-        f"---"
-    )
+    return {
+        "order_id": o.id,
+        "order_number": o.order_number,
+        "email": getattr(o, 'email', 'N/A'),
+        "total": o.total_price,
+        "financial_status": o.financial_status,
+        "fulfillment_status": getattr(o, 'fulfillment_status', 'N/A'),
+        "items": [i.title for i in o.line_items] if o.line_items else [],
+        "source": getattr(o, 'referring_site', 'N/A'),
+        "created_at": o.created_at,
+    }
 
 def format_abandoned(a):
-    items = ', '.join([i.title for i in a.line_items]) if getattr(a, 'line_items', None) else 'N/A'
-    return (
-        f"Checkout ID: {a.id}\n"
-        f"Email: {getattr(a, 'email', 'N/A')}\n"
-        f"Phone: {getattr(a, 'phone', 'N/A')}\n"
-        f"Total: ${getattr(a, 'total_price', '0.00')}\n"
-        f"Items Abandoned: {items}\n"
-        f"Abandoned At: {getattr(a, 'created_at', 'N/A')}\n"
-        f"Recovery URL: {getattr(a, 'abandoned_checkout_url', 'N/A')}\n"
-        f"---"
-    )
+    return {
+        "checkout_id": a.id,
+        "email": getattr(a, 'email', 'N/A'),
+        "phone": getattr(a, 'phone', 'N/A'),
+        "total": getattr(a, 'total_price', '0.00'),
+        "items": [i.title for i in a.line_items] if getattr(a, 'line_items', None) else [],
+        "abandoned_at": getattr(a, 'created_at', 'N/A'),
+        "recovery_url": getattr(a, 'abandoned_checkout_url', 'N/A'),
+    }
+
+# ─── REST API Endpoints ───────────────────────────────────────────────
+
+async def rest_revenue(request: Request):
+    try:
+        init_shopify()
+        customers = shopify.Customer.find(limit=250)
+        orders = shopify.Order.find(limit=250, status="any")
+        total_revenue = sum(float(o.total_price) for o in orders)
+        total_customers = len(customers)
+        total_orders = len(orders)
+        buyers = [c for c in customers if int(getattr(c, 'orders_count', 0)) > 0]
+        repeat_buyers = [c for c in customers if int(getattr(c, 'orders_count', 0)) >= 2]
+        marketing_opted = [c for c in customers if getattr(c, 'accepts_marketing', False) or getattr(c, 'email_marketing_consent', None)]
+        return JSONResponse({
+            "total_customers": total_customers,
+            "total_orders": total_orders,
+            "total_revenue": round(total_revenue, 2),
+            "average_order_value": round(total_revenue/total_orders, 2) if total_orders > 0 else 0,
+            "buyers": len(buyers),
+            "repeat_buyers": len(repeat_buyers),
+            "non_buyers": total_customers - len(buyers),
+            "marketing_subscribers": len(marketing_opted),
+        })
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+async def rest_customers(request: Request):
+    try:
+        init_shopify()
+        limit = int(request.query_params.get("limit", 50))
+        customers = shopify.Customer.find(limit=limit)
+        return JSONResponse({"count": len(customers), "customers": [format_customer_for_ads(c) for c in customers]})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+async def rest_orders(request: Request):
+    try:
+        init_shopify()
+        limit = int(request.query_params.get("limit", 20))
+        orders = shopify.Order.find(limit=limit, status="any")
+        return JSONResponse({"count": len(orders), "orders": [format_order(o) for o in orders]})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+async def rest_abandoned(request: Request):
+    try:
+        init_shopify()
+        limit = int(request.query_params.get("limit", 20))
+        abandoned = shopify.Checkout.find(limit=limit)
+        return JSONResponse({"count": len(abandoned), "abandoned_checkouts": [format_abandoned(a) for a in abandoned]})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+async def rest_products(request: Request):
+    try:
+        init_shopify()
+        limit = int(request.query_params.get("limit", 20))
+        products = shopify.Product.find(limit=limit)
+        return JSONResponse({"count": len(products), "products": [{"id": p.id, "title": p.title, "price": p.variants[0].price if p.variants else 'N/A', "status": p.status} for p in products]})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+async def rest_top_spenders(request: Request):
+    try:
+        init_shopify()
+        limit = int(request.query_params.get("limit", 20))
+        customers = shopify.Customer.find(limit=250)
+        sorted_customers = sorted(customers, key=lambda c: float(getattr(c, 'total_spent', 0)), reverse=True)[:limit]
+        return JSONResponse({"count": len(sorted_customers), "top_spenders": [format_customer_for_ads(c) for c in sorted_customers]})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+async def rest_subscribers(request: Request):
+    try:
+        init_shopify()
+        limit = int(request.query_params.get("limit", 50))
+        customers = shopify.Customer.find(limit=limit)
+        subscribers = [c for c in customers if getattr(c, 'accepts_marketing', False) or getattr(c, 'email_marketing_consent', None)]
+        return JSONResponse({"count": len(subscribers), "subscribers": [format_customer_for_ads(c) for c in subscribers]})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+async def rest_docs(request: Request):
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Neolook Shopify API</title>
+        <meta charset="utf-8"/>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <link rel="stylesheet" type="text/css" href="https://cdnjs.cloudflare.com/ajax/libs/swagger-ui/5.1.0/swagger-ui.css">
+    </head>
+    <body>
+    <div id="swagger-ui"></div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/swagger-ui/5.1.0/swagger-ui-bundle.js"></script>
+    <script>
+    SwaggerUIBundle({
+        url: "/openapi.json",
+        dom_id: '#swagger-ui',
+        presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],
+        layout: "BaseLayout"
+    })
+    </script>
+    </body>
+    </html>
+    """
+    from starlette.responses import HTMLResponse
+    return HTMLResponse(html)
+
+async def rest_openapi(request: Request):
+    spec = {
+        "openapi": "3.0.0",
+        "info": {"title": "Neolook Shopify MCP API", "version": "1.0.0", "description": "Shopify customer and order data API for Neolook ad targeting"},
+        "paths": {
+            "/revenue": {"get": {"summary": "Store revenue summary", "tags": ["Analytics"], "responses": {"200": {"description": "Revenue metrics"}}}},
+            "/customers": {"get": {"summary": "All customer profiles for ad targeting", "tags": ["Customers"], "parameters": [{"name": "limit", "in": "query", "schema": {"type": "integer", "default": 50}}], "responses": {"200": {"description": "Customer list"}}}},
+            "/customers/top-spenders": {"get": {"summary": "Top spending customers for lookalike audiences", "tags": ["Customers"], "parameters": [{"name": "limit", "in": "query", "schema": {"type": "integer", "default": 20}}], "responses": {"200": {"description": "Top spenders"}}}},
+            "/customers/subscribers": {"get": {"summary": "Marketing subscribers", "tags": ["Customers"], "parameters": [{"name": "limit", "in": "query", "schema": {"type": "integer", "default": 50}}], "responses": {"200": {"description": "Subscribers"}}}},
+            "/orders": {"get": {"summary": "All store orders", "tags": ["Orders"], "parameters": [{"name": "limit", "in": "query", "schema": {"type": "integer", "default": 20}}], "responses": {"200": {"description": "Orders list"}}}},
+            "/abandoned": {"get": {"summary": "Abandoned checkouts for re-engagement", "tags": ["Orders"], "parameters": [{"name": "limit", "in": "query", "schema": {"type": "integer", "default": 20}}], "responses": {"200": {"description": "Abandoned checkouts"}}}},
+            "/products": {"get": {"summary": "Product list", "tags": ["Products"], "parameters": [{"name": "limit", "in": "query", "schema": {"type": "integer", "default": 20}}], "responses": {"200": {"description": "Products"}}}},
+        }
+    }
+    return JSONResponse(spec)
+
+# ─── MCP Tools ───────────────────────────────────────────────────────
 
 @server.list_tools()
 async def handle_list_tools() -> list[types.Tool]:
     return [
-        types.Tool(
-            name="get-customers-for-ads",
-            description="Get full customer profiles optimized for Meta/Google ad targeting",
-            inputSchema={"type": "object", "properties": {"limit": {"type": "number", "description": "Max customers to return (default: 50)"}}}
-        ),
-        types.Tool(
-            name="get-top-spenders",
-            description="Get highest value customers by total spend — ideal for lookalike audiences on Meta and Google",
-            inputSchema={"type": "object", "properties": {"limit": {"type": "number", "description": "Max customers to return (default: 20)"}}}
-        ),
-        types.Tool(
-            name="get-repeat-buyers",
-            description="Get customers with 2+ orders — ideal for loyalty and retention campaigns",
-            inputSchema={"type": "object", "properties": {"min_orders": {"type": "number", "description": "Minimum number of orders (default: 2)"}}}
-        ),
-        types.Tool(
-            name="get-new-customers",
-            description="Get first-time buyers — ideal for onboarding and welcome campaigns",
-            inputSchema={"type": "object", "properties": {"limit": {"type": "number", "description": "Max customers to return (default: 20)"}}}
-        ),
-        types.Tool(
-            name="get-abandoned-checkouts",
-            description="Get abandoned carts with contact info — for WhatsApp/SMS/email re-engagement",
-            inputSchema={"type": "object", "properties": {"limit": {"type": "number", "description": "Max abandoned checkouts to return (default: 20)"}}}
-        ),
-        types.Tool(
-            name="get-non-buyers",
-            description="Get customers who never placed an order — ideal for TOFU retargeting",
-            inputSchema={"type": "object", "properties": {"limit": {"type": "number", "description": "Max customers to return (default: 20)"}}}
-        ),
-        types.Tool(
-            name="get-customer-orders",
-            description="Get full order history for a specific customer — for BOFU attribution",
-            inputSchema={"type": "object", "required": ["customer_id"], "properties": {"customer_id": {"type": "string", "description": "Shopify customer ID"}}}
-        ),
-        types.Tool(
-            name="get-all-orders",
-            description="Get all store orders with source, items, and revenue — for campaign attribution",
-            inputSchema={"type": "object", "properties": {"limit": {"type": "number", "description": "Max orders to return (default: 20)"}}}
-        ),
-        types.Tool(
-            name="get-revenue-summary",
-            description="Get overall store revenue metrics — total customers, orders, and revenue",
-            inputSchema={"type": "object", "properties": {}}
-        ),
-        types.Tool(
-            name="get-marketing-subscribers",
-            description="Get customers opted in to marketing — safe to target via email/WhatsApp/SMS",
-            inputSchema={"type": "object", "properties": {"limit": {"type": "number", "description": "Max customers to return (default: 50)"}}}
-        ),
-        types.Tool(
-            name="get-customers-by-location",
-            description="Get customers grouped by city or country — for geo-targeted ad campaigns",
-            inputSchema={"type": "object", "properties": {"location_type": {"type": "string", "description": "Group by 'city' or 'country' (default: country)"}}}
-        ),
-        types.Tool(
-            name="get-product-list",
-            description="Get list of products from the Shopify store",
-            inputSchema={"type": "object", "properties": {"limit": {"type": "number", "description": "Max products to return (default: 10)"}}}
-        ),
+        types.Tool(name="get-customers-for-ads", description="Get full customer profiles optimized for Meta/Google ad targeting", inputSchema={"type": "object", "properties": {"limit": {"type": "number"}}}),
+        types.Tool(name="get-top-spenders", description="Get highest value customers by total spend", inputSchema={"type": "object", "properties": {"limit": {"type": "number"}}}),
+        types.Tool(name="get-repeat-buyers", description="Get customers with 2+ orders", inputSchema={"type": "object", "properties": {"min_orders": {"type": "number"}}}),
+        types.Tool(name="get-new-customers", description="Get first-time buyers", inputSchema={"type": "object", "properties": {"limit": {"type": "number"}}}),
+        types.Tool(name="get-abandoned-checkouts", description="Get abandoned carts", inputSchema={"type": "object", "properties": {"limit": {"type": "number"}}}),
+        types.Tool(name="get-non-buyers", description="Get customers who never ordered", inputSchema={"type": "object", "properties": {"limit": {"type": "number"}}}),
+        types.Tool(name="get-customer-orders", description="Get order history for a customer", inputSchema={"type": "object", "required": ["customer_id"], "properties": {"customer_id": {"type": "string"}}}),
+        types.Tool(name="get-all-orders", description="Get all store orders", inputSchema={"type": "object", "properties": {"limit": {"type": "number"}}}),
+        types.Tool(name="get-revenue-summary", description="Get store revenue metrics", inputSchema={"type": "object", "properties": {}}),
+        types.Tool(name="get-marketing-subscribers", description="Get marketing opted-in customers", inputSchema={"type": "object", "properties": {"limit": {"type": "number"}}}),
+        types.Tool(name="get-customers-by-location", description="Get customers by location", inputSchema={"type": "object", "properties": {"location_type": {"type": "string"}}}),
+        types.Tool(name="get-product-list", description="Get product list", inputSchema={"type": "object", "properties": {"limit": {"type": "number"}}}),
     ]
 
 @server.call_tool()
@@ -146,17 +221,13 @@ async def handle_call_tool(name, arguments):
             customers = shopify.Customer.find(limit=limit)
             if not customers:
                 return [types.TextContent(type="text", text="No customers found")]
-            result = f"Customer Ad Profiles ({len(customers)}):\n\n" + "\n".join([format_customer_for_ads(c) for c in customers])
-            return [types.TextContent(type="text", text=result)]
+            return [types.TextContent(type="text", text="\n".join([str(format_customer_for_ads(c)) for c in customers]))]
 
         elif name == "get-top-spenders":
             limit = int(arguments.get("limit", 20))
             customers = shopify.Customer.find(limit=250)
             sorted_customers = sorted(customers, key=lambda c: float(getattr(c, 'total_spent', 0)), reverse=True)[:limit]
-            if not sorted_customers:
-                return [types.TextContent(type="text", text="No customers found")]
-            result = f"Top {len(sorted_customers)} Spenders (Lookalike Audience):\n\n" + "\n".join([format_customer_for_ads(c) for c in sorted_customers])
-            return [types.TextContent(type="text", text=result)]
+            return [types.TextContent(type="text", text="\n".join([str(format_customer_for_ads(c)) for c in sorted_customers]))]
 
         elif name == "get-repeat-buyers":
             min_orders = int(arguments.get("min_orders", 2))
@@ -164,8 +235,7 @@ async def handle_call_tool(name, arguments):
             repeat = [c for c in customers if int(getattr(c, 'orders_count', 0)) >= min_orders]
             if not repeat:
                 return [types.TextContent(type="text", text="No repeat buyers found")]
-            result = f"Repeat Buyers ({len(repeat)} customers with {min_orders}+ orders):\n\n" + "\n".join([format_customer_for_ads(c) for c in repeat])
-            return [types.TextContent(type="text", text=result)]
+            return [types.TextContent(type="text", text="\n".join([str(format_customer_for_ads(c)) for c in repeat]))]
 
         elif name == "get-new-customers":
             limit = int(arguments.get("limit", 20))
@@ -173,16 +243,14 @@ async def handle_call_tool(name, arguments):
             new = [c for c in customers if int(getattr(c, 'orders_count', 0)) == 1]
             if not new:
                 return [types.TextContent(type="text", text="No first-time buyers found")]
-            result = f"First-Time Buyers ({len(new)}):\n\n" + "\n".join([format_customer_for_ads(c) for c in new])
-            return [types.TextContent(type="text", text=result)]
+            return [types.TextContent(type="text", text="\n".join([str(format_customer_for_ads(c)) for c in new]))]
 
         elif name == "get-abandoned-checkouts":
             limit = int(arguments.get("limit", 20))
             abandoned = shopify.Checkout.find(limit=limit)
             if not abandoned:
                 return [types.TextContent(type="text", text="No abandoned checkouts found")]
-            result = f"Abandoned Checkouts ({len(abandoned)}) — Re-engagement Targets:\n\n" + "\n".join([format_abandoned(a) for a in abandoned])
-            return [types.TextContent(type="text", text=result)]
+            return [types.TextContent(type="text", text="\n".join([str(format_abandoned(a)) for a in abandoned]))]
 
         elif name == "get-non-buyers":
             limit = int(arguments.get("limit", 20))
@@ -190,24 +258,21 @@ async def handle_call_tool(name, arguments):
             non_buyers = [c for c in customers if int(getattr(c, 'orders_count', 0)) == 0]
             if not non_buyers:
                 return [types.TextContent(type="text", text="No non-buyers found")]
-            result = f"Non-Buyers ({len(non_buyers)}) — TOFU Retargeting:\n\n" + "\n".join([format_customer_for_ads(c) for c in non_buyers])
-            return [types.TextContent(type="text", text=result)]
+            return [types.TextContent(type="text", text="\n".join([str(format_customer_for_ads(c)) for c in non_buyers]))]
 
         elif name == "get-customer-orders":
             customer_id = arguments.get("customer_id")
             orders = shopify.Order.find(customer_id=customer_id, limit=50)
             if not orders:
                 return [types.TextContent(type="text", text=f"No orders found for customer {customer_id}")]
-            result = f"Orders for Customer {customer_id} ({len(orders)} orders):\n\n" + "\n".join([format_order(o) for o in orders])
-            return [types.TextContent(type="text", text=result)]
+            return [types.TextContent(type="text", text="\n".join([str(format_order(o)) for o in orders]))]
 
         elif name == "get-all-orders":
             limit = int(arguments.get("limit", 20))
             orders = shopify.Order.find(limit=limit, status="any")
             if not orders:
                 return [types.TextContent(type="text", text="No orders found")]
-            result = f"All Orders ({len(orders)}):\n\n" + "\n".join([format_order(o) for o in orders])
-            return [types.TextContent(type="text", text=result)]
+            return [types.TextContent(type="text", text="\n".join([str(format_order(o)) for o in orders]))]
 
         elif name == "get-revenue-summary":
             customers = shopify.Customer.find(limit=250)
@@ -238,8 +303,7 @@ async def handle_call_tool(name, arguments):
             subscribers = [c for c in customers if getattr(c, 'accepts_marketing', False) or getattr(c, 'email_marketing_consent', None)]
             if not subscribers:
                 return [types.TextContent(type="text", text="No marketing subscribers found")]
-            result = f"Marketing Subscribers ({len(subscribers)}) — Safe to Target:\n\n" + "\n".join([format_customer_for_ads(c) for c in subscribers])
-            return [types.TextContent(type="text", text=result)]
+            return [types.TextContent(type="text", text="\n".join([str(format_customer_for_ads(c)) for c in subscribers]))]
 
         elif name == "get-customers-by-location":
             location_type = arguments.get("location_type", "country")
@@ -251,13 +315,10 @@ async def handle_call_tool(name, arguments):
                     key = getattr(addr, 'country', 'N/A') if location_type == "country" else getattr(addr, 'city', 'N/A')
                     if key not in groups:
                         groups[key] = []
-                    groups[key].append(f"{getattr(c, 'first_name', 'N/A')} {getattr(c, 'last_name', 'N/A')} ({getattr(c, 'email', 'N/A')})")
+                    groups[key].append(f"{getattr(c, 'first_name', 'N/A')} {getattr(c, 'last_name', 'N/A')}")
             if not groups:
                 return [types.TextContent(type="text", text="No location data found")]
-            result = f"Customers by {location_type.title()} (Geo-targeting):\n\n"
-            for location, names in sorted(groups.items(), key=lambda x: len(x[1]), reverse=True):
-                result += f"{location}: {len(names)} customers\n"
-                result += "\n".join([f"  - {n}" for n in names]) + "\n\n"
+            result = "\n".join([f"{loc}: {len(names)} customers" for loc, names in sorted(groups.items(), key=lambda x: len(x[1]), reverse=True)])
             return [types.TextContent(type="text", text=result)]
 
         elif name == "get-product-list":
@@ -265,8 +326,7 @@ async def handle_call_tool(name, arguments):
             products = shopify.Product.find(limit=limit)
             if not products:
                 return [types.TextContent(type="text", text="No products found")]
-            result = "\n".join([f"Title: {p.title}\nID: {p.id}\nPrice: ${p.variants[0].price if p.variants else 'N/A'}\nStatus: {p.status}\n---" for p in products])
-            return [types.TextContent(type="text", text=f"Products ({len(products)}):\n\n{result}")]
+            return [types.TextContent(type="text", text="\n".join([f"{p.title} - ${p.variants[0].price if p.variants else 'N/A'} ({p.status})" for p in products]))]
 
         else:
             raise ValueError(f"Unknown tool: {name}")
@@ -283,7 +343,7 @@ def run_sse_server():
                 streams[0], streams[1],
                 InitializationOptions(
                     server_name="shopify",
-                    server_version="0.1.0",
+                    server_version="1.0.0",
                     capabilities=server.get_capabilities(
                         notification_options=NotificationOptions(),
                         experimental_capabilities={},
@@ -292,12 +352,25 @@ def run_sse_server():
             )
 
     app = Starlette(routes=[
+        # MCP endpoints
         Route("/sse", endpoint=handle_sse),
         Route("/messages/", endpoint=sse.handle_post_message, methods=["POST"]),
+        # REST endpoints
+        Route("/revenue", endpoint=rest_revenue),
+        Route("/customers", endpoint=rest_customers),
+        Route("/customers/top-spenders", endpoint=rest_top_spenders),
+        Route("/customers/subscribers", endpoint=rest_subscribers),
+        Route("/orders", endpoint=rest_orders),
+        Route("/abandoned", endpoint=rest_abandoned),
+        Route("/products", endpoint=rest_products),
+        # Swagger docs
+        Route("/docs", endpoint=rest_docs),
+        Route("/openapi.json", endpoint=rest_openapi),
     ])
 
     port = int(os.getenv("PORT", 8000))
-    print(f"Starting Neolook Shopify MCP Server on http://0.0.0.0:{port}/sse")
+    print(f"Starting Neolook Shopify API on http://0.0.0.0:{port}")
+    print(f"Swagger docs: http://0.0.0.0:{port}/docs")
     uvicorn.run(app, host="0.0.0.0", port=port)
 
 async def run_stdio_server():
@@ -306,7 +379,7 @@ async def run_stdio_server():
             read_stream, write_stream,
             InitializationOptions(
                 server_name="shopify",
-                server_version="0.1.0",
+                server_version="1.0.0",
                 capabilities=server.get_capabilities(
                     notification_options=NotificationOptions(),
                     experimental_capabilities={},
