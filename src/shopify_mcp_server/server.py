@@ -30,9 +30,9 @@ def format_customer_for_ads(c):
         f"Name: {getattr(c, 'first_name', 'N/A')} {getattr(c, 'last_name', 'N/A')}\n"
         f"Email: {getattr(c, 'email', 'N/A')}\n"
         f"Phone: {getattr(c, 'phone', 'N/A')}\n"
-        f"City: {addr.city if addr else 'N/A'}\n"
-        f"State: {addr.province if addr else 'N/A'}\n"
-        f"Country: {addr.country if addr else 'N/A'}\n"
+        f"City: {getattr(addr, 'city', 'N/A') if addr else 'N/A'}\n"
+        f"State: {getattr(addr, 'province', 'N/A') if addr else 'N/A'}\n"
+        f"Country: {getattr(addr, 'country', 'N/A') if addr else 'N/A'}\n"
         f"Total Spent: ${getattr(c, 'total_spent', '0.00')}\n"
         f"Orders Count: {getattr(c, 'orders_count', 0)}\n"
         f"Accepts Marketing: {getattr(c, 'accepts_marketing', getattr(c, 'email_marketing_consent', 'N/A'))}\n"
@@ -46,10 +46,10 @@ def format_order(o):
     return (
         f"Order ID: {o.id}\n"
         f"Order Number: {o.order_number}\n"
-        f"Email: {o.email}\n"
+        f"Email: {getattr(o, 'email', 'N/A')}\n"
         f"Total: ${o.total_price}\n"
         f"Financial Status: {o.financial_status}\n"
-        f"Fulfillment Status: {o.fulfillment_status}\n"
+        f"Fulfillment Status: {getattr(o, 'fulfillment_status', 'N/A')}\n"
         f"Items: {items}\n"
         f"Source: {getattr(o, 'referring_site', 'N/A')}\n"
         f"Created At: {o.created_at}\n"
@@ -57,14 +57,14 @@ def format_order(o):
     )
 
 def format_abandoned(a):
-    items = ', '.join([i.title for i in a.line_items]) if a.line_items else 'N/A'
+    items = ', '.join([i.title for i in a.line_items]) if getattr(a, 'line_items', None) else 'N/A'
     return (
         f"Checkout ID: {a.id}\n"
         f"Email: {getattr(a, 'email', 'N/A')}\n"
         f"Phone: {getattr(a, 'phone', 'N/A')}\n"
-        f"Total: ${a.total_price}\n"
+        f"Total: ${getattr(a, 'total_price', '0.00')}\n"
         f"Items Abandoned: {items}\n"
-        f"Abandoned At: {a.created_at}\n"
+        f"Abandoned At: {getattr(a, 'created_at', 'N/A')}\n"
         f"Recovery URL: {getattr(a, 'abandoned_checkout_url', 'N/A')}\n"
         f"---"
     )
@@ -248,7 +248,7 @@ async def handle_call_tool(name, arguments):
             for c in customers:
                 addr = getattr(c, 'default_address', None)
                 if addr:
-                    key = addr.country if location_type == "country" else addr.city
+                    key = getattr(addr, 'country', 'N/A') if location_type == "country" else getattr(addr, 'city', 'N/A')
                     if key not in groups:
                         groups[key] = []
                     groups[key].append(f"{getattr(c, 'first_name', 'N/A')} {getattr(c, 'last_name', 'N/A')} ({getattr(c, 'email', 'N/A')})")
