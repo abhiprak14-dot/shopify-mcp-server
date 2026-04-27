@@ -36,7 +36,7 @@ def format_customer_for_ads(c):
         "country": getattr(addr, 'country', 'N/A') if addr else 'N/A',
         "total_spent": getattr(c, 'total_spent', '0.00'),
         "orders_count": getattr(c, 'orders_count', 0),
-        "accepts_marketing": getattr(c, 'accepts_marketing', getattr(c, 'email_marketing_consent', 'N/A')),
+        "accepts_marketing": str(getattr(c, 'accepts_marketing', getattr(c, 'email_marketing_consent', 'N/A'))),
         "tags": getattr(c, 'tags', 'N/A'),
         "created_at": getattr(c, 'created_at', 'N/A'),
     }
@@ -65,13 +65,34 @@ def format_abandoned(a):
         "recovery_url": getattr(a, 'abandoned_checkout_url', 'N/A'),
     }
 
-# ─── REST API Endpoints ───────────────────────────────────────────────
+# ─── Shopify helpers (non-blocking) ──────────────────────────────────
+
+async def find_customers(limit=250):
+    init_shopify()
+    return await asyncio.to_thread(shopify.Customer.find, limit=limit)
+
+async def find_orders(limit=250, status="any"):
+    init_shopify()
+    return await asyncio.to_thread(shopify.Order.find, limit=limit, status=status)
+
+async def find_products(limit=50):
+    init_shopify()
+    return await asyncio.to_thread(shopify.Product.find, limit=limit)
+
+async def find_checkouts(limit=20):
+    init_shopify()
+    return await asyncio.to_thread(shopify.Checkout.find, limit=limit)
+
+async def find_customer_orders(customer_id, limit=50):
+    init_shopify()
+    return await asyncio.to_thread(shopify.Order.find, customer_id=customer_id, limit=limit)
+
+# ─── REST Endpoints ───────────────────────────────────────────────────
 
 async def rest_revenue(request: Request):
     try:
-        init_shopify()
-        customers = shopify.Customer.find(limit=250)
-        orders = shopify.Order.find(limit=250, status="any")
+        customers = await find_customers(250)
+        orders = await find_orders(250)
         total_revenue = sum(float(o.total_price) for o in orders)
         total_customers = len(customers)
         total_orders = len(orders)
@@ -93,45 +114,40 @@ async def rest_revenue(request: Request):
 
 async def rest_customers(request: Request):
     try:
-        init_shopify()
         limit = int(request.query_params.get("limit", 50))
-        customers = shopify.Customer.find(limit=limit)
+        customers = await find_customers(limit)
         return JSONResponse({"count": len(customers), "customers": [format_customer_for_ads(c) for c in customers]})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
 async def rest_orders(request: Request):
     try:
-        init_shopify()
         limit = int(request.query_params.get("limit", 20))
-        orders = shopify.Order.find(limit=limit, status="any")
+        orders = await find_orders(limit)
         return JSONResponse({"count": len(orders), "orders": [format_order(o) for o in orders]})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
 async def rest_abandoned(request: Request):
     try:
-        init_shopify()
         limit = int(request.query_params.get("limit", 20))
-        abandoned = shopify.Checkout.find(limit=limit)
+        abandoned = await find_checkouts(limit)
         return JSONResponse({"count": len(abandoned), "abandoned_checkouts": [format_abandoned(a) for a in abandoned]})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
 async def rest_products(request: Request):
     try:
-        init_shopify()
         limit = int(request.query_params.get("limit", 20))
-        products = shopify.Product.find(limit=limit)
+        products = await find_products(limit)
         return JSONResponse({"count": len(products), "products": [{"id": p.id, "title": p.title, "price": p.variants[0].price if p.variants else 'N/A', "status": p.status} for p in products]})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
 async def rest_top_spenders(request: Request):
     try:
-        init_shopify()
         limit = int(request.query_params.get("limit", 20))
-        customers = shopify.Customer.find(limit=250)
+        customers = await find_customers(250)
         sorted_customers = sorted(customers, key=lambda c: float(getattr(c, 'total_spent', 0)), reverse=True)[:limit]
         return JSONResponse({"count": len(sorted_customers), "top_spenders": [format_customer_for_ads(c) for c in sorted_customers]})
     except Exception as e:
@@ -139,17 +155,16 @@ async def rest_top_spenders(request: Request):
 
 async def rest_subscribers(request: Request):
     try:
-        init_shopify()
         limit = int(request.query_params.get("limit", 50))
-        customers = shopify.Customer.find(limit=limit)
+        customers = await find_customers(limit)
         subscribers = [c for c in customers if getattr(c, 'accepts_marketing', False) or getattr(c, 'email_marketing_consent', None)]
         return JSONResponse({"count": len(subscribers), "subscribers": [format_customer_for_ads(c) for c in subscribers]})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
 async def rest_docs(request: Request):
-    html = """
-    <!DOCTYPE html>
+    from starlette.responses import HTMLResponse
+    html = """<!DOCTYPE html>
     <html>
     <head>
         <title>Neolook Shopify API</title>
@@ -169,22 +184,20 @@ async def rest_docs(request: Request):
     })
     </script>
     </body>
-    </html>
-    """
-    from starlette.responses import HTMLResponse
+    </html>"""
     return HTMLResponse(html)
 
 async def rest_openapi(request: Request):
     spec = {
         "openapi": "3.0.0",
-        "info": {"title": "Neolook Shopify MCP API", "version": "1.0.0", "description": "Shopify customer and order data API for Neolook ad targeting"},
+        "info": {"title": "Neolook Shopify API", "version": "1.0.0", "description": "Shopify customer and order data API for Neolook ad targeting"},
         "paths": {
             "/revenue": {"get": {"summary": "Store revenue summary", "tags": ["Analytics"], "responses": {"200": {"description": "Revenue metrics"}}}},
-            "/customers": {"get": {"summary": "All customer profiles for ad targeting", "tags": ["Customers"], "parameters": [{"name": "limit", "in": "query", "schema": {"type": "integer", "default": 50}}], "responses": {"200": {"description": "Customer list"}}}},
-            "/customers/top-spenders": {"get": {"summary": "Top spending customers for lookalike audiences", "tags": ["Customers"], "parameters": [{"name": "limit", "in": "query", "schema": {"type": "integer", "default": 20}}], "responses": {"200": {"description": "Top spenders"}}}},
+            "/customers": {"get": {"summary": "All customer profiles", "tags": ["Customers"], "parameters": [{"name": "limit", "in": "query", "schema": {"type": "integer", "default": 50}}], "responses": {"200": {"description": "Customer list"}}}},
+            "/customers/top-spenders": {"get": {"summary": "Top spenders for lookalike audiences", "tags": ["Customers"], "parameters": [{"name": "limit", "in": "query", "schema": {"type": "integer", "default": 20}}], "responses": {"200": {"description": "Top spenders"}}}},
             "/customers/subscribers": {"get": {"summary": "Marketing subscribers", "tags": ["Customers"], "parameters": [{"name": "limit", "in": "query", "schema": {"type": "integer", "default": 50}}], "responses": {"200": {"description": "Subscribers"}}}},
-            "/orders": {"get": {"summary": "All store orders", "tags": ["Orders"], "parameters": [{"name": "limit", "in": "query", "schema": {"type": "integer", "default": 20}}], "responses": {"200": {"description": "Orders list"}}}},
-            "/abandoned": {"get": {"summary": "Abandoned checkouts for re-engagement", "tags": ["Orders"], "parameters": [{"name": "limit", "in": "query", "schema": {"type": "integer", "default": 20}}], "responses": {"200": {"description": "Abandoned checkouts"}}}},
+            "/orders": {"get": {"summary": "All store orders", "tags": ["Orders"], "parameters": [{"name": "limit", "in": "query", "schema": {"type": "integer", "default": 20}}], "responses": {"200": {"description": "Orders"}}}},
+            "/abandoned": {"get": {"summary": "Abandoned checkouts", "tags": ["Orders"], "parameters": [{"name": "limit", "in": "query", "schema": {"type": "integer", "default": 20}}], "responses": {"200": {"description": "Abandoned checkouts"}}}},
             "/products": {"get": {"summary": "Product list", "tags": ["Products"], "parameters": [{"name": "limit", "in": "query", "schema": {"type": "integer", "default": 20}}], "responses": {"200": {"description": "Products"}}}},
         }
     }
@@ -214,69 +227,67 @@ async def handle_call_tool(name, arguments):
     if not arguments:
         arguments = {}
     try:
-        init_shopify()
-
         if name == "get-customers-for-ads":
             limit = int(arguments.get("limit", 50))
-            customers = shopify.Customer.find(limit=limit)
+            customers = await find_customers(limit)
             if not customers:
                 return [types.TextContent(type="text", text="No customers found")]
-            return [types.TextContent(type="text", text="\n".join([str(format_customer_for_ads(c)) for c in customers]))]
+            return [types.TextContent(type="text", text=str([format_customer_for_ads(c) for c in customers]))]
 
         elif name == "get-top-spenders":
             limit = int(arguments.get("limit", 20))
-            customers = shopify.Customer.find(limit=250)
+            customers = await find_customers(250)
             sorted_customers = sorted(customers, key=lambda c: float(getattr(c, 'total_spent', 0)), reverse=True)[:limit]
-            return [types.TextContent(type="text", text="\n".join([str(format_customer_for_ads(c)) for c in sorted_customers]))]
+            return [types.TextContent(type="text", text=str([format_customer_for_ads(c) for c in sorted_customers]))]
 
         elif name == "get-repeat-buyers":
             min_orders = int(arguments.get("min_orders", 2))
-            customers = shopify.Customer.find(limit=250)
+            customers = await find_customers(250)
             repeat = [c for c in customers if int(getattr(c, 'orders_count', 0)) >= min_orders]
             if not repeat:
                 return [types.TextContent(type="text", text="No repeat buyers found")]
-            return [types.TextContent(type="text", text="\n".join([str(format_customer_for_ads(c)) for c in repeat]))]
+            return [types.TextContent(type="text", text=str([format_customer_for_ads(c) for c in repeat]))]
 
         elif name == "get-new-customers":
             limit = int(arguments.get("limit", 20))
-            customers = shopify.Customer.find(limit=limit)
+            customers = await find_customers(limit)
             new = [c for c in customers if int(getattr(c, 'orders_count', 0)) == 1]
             if not new:
                 return [types.TextContent(type="text", text="No first-time buyers found")]
-            return [types.TextContent(type="text", text="\n".join([str(format_customer_for_ads(c)) for c in new]))]
+            return [types.TextContent(type="text", text=str([format_customer_for_ads(c) for c in new]))]
 
         elif name == "get-abandoned-checkouts":
             limit = int(arguments.get("limit", 20))
-            abandoned = shopify.Checkout.find(limit=limit)
+            abandoned = await find_checkouts(limit)
             if not abandoned:
                 return [types.TextContent(type="text", text="No abandoned checkouts found")]
-            return [types.TextContent(type="text", text="\n".join([str(format_abandoned(a)) for a in abandoned]))]
+            return [types.TextContent(type="text", text=str([format_abandoned(a) for a in abandoned]))]
 
         elif name == "get-non-buyers":
             limit = int(arguments.get("limit", 20))
-            customers = shopify.Customer.find(limit=limit)
+            customers = await find_customers(limit)
             non_buyers = [c for c in customers if int(getattr(c, 'orders_count', 0)) == 0]
             if not non_buyers:
                 return [types.TextContent(type="text", text="No non-buyers found")]
-            return [types.TextContent(type="text", text="\n".join([str(format_customer_for_ads(c)) for c in non_buyers]))]
+            return [types.TextContent(type="text", text=str([format_customer_for_ads(c) for c in non_buyers]))]
 
         elif name == "get-customer-orders":
             customer_id = arguments.get("customer_id")
-            orders = shopify.Order.find(customer_id=customer_id, limit=50)
+            orders = await find_customer_orders(customer_id)
             if not orders:
                 return [types.TextContent(type="text", text=f"No orders found for customer {customer_id}")]
-            return [types.TextContent(type="text", text="\n".join([str(format_order(o)) for o in orders]))]
+            return [types.TextContent(type="text", text=str([format_order(o) for o in orders]))]
 
         elif name == "get-all-orders":
             limit = int(arguments.get("limit", 20))
-            orders = shopify.Order.find(limit=limit, status="any")
+            orders = await find_orders(limit)
             if not orders:
                 return [types.TextContent(type="text", text="No orders found")]
-            return [types.TextContent(type="text", text="\n".join([str(format_order(o)) for o in orders]))]
+            return [types.TextContent(type="text", text=str([format_order(o) for o in orders]))]
 
         elif name == "get-revenue-summary":
-            customers = shopify.Customer.find(limit=250)
-            orders = shopify.Order.find(limit=250, status="any")
+            customers = await find_customers(250)
+            orders = await find_orders(250)
             total_revenue = sum(float(o.total_price) for o in orders)
             total_customers = len(customers)
             total_orders = len(orders)
@@ -299,15 +310,15 @@ async def handle_call_tool(name, arguments):
 
         elif name == "get-marketing-subscribers":
             limit = int(arguments.get("limit", 50))
-            customers = shopify.Customer.find(limit=limit)
+            customers = await find_customers(limit)
             subscribers = [c for c in customers if getattr(c, 'accepts_marketing', False) or getattr(c, 'email_marketing_consent', None)]
             if not subscribers:
                 return [types.TextContent(type="text", text="No marketing subscribers found")]
-            return [types.TextContent(type="text", text="\n".join([str(format_customer_for_ads(c)) for c in subscribers]))]
+            return [types.TextContent(type="text", text=str([format_customer_for_ads(c) for c in subscribers]))]
 
         elif name == "get-customers-by-location":
             location_type = arguments.get("location_type", "country")
-            customers = shopify.Customer.find(limit=250)
+            customers = await find_customers(250)
             groups = {}
             for c in customers:
                 addr = getattr(c, 'default_address', None)
@@ -323,7 +334,7 @@ async def handle_call_tool(name, arguments):
 
         elif name == "get-product-list":
             limit = int(arguments.get("limit", 10))
-            products = shopify.Product.find(limit=limit)
+            products = await find_products(limit)
             if not products:
                 return [types.TextContent(type="text", text="No products found")]
             return [types.TextContent(type="text", text="\n".join([f"{p.title} - ${p.variants[0].price if p.variants else 'N/A'} ({p.status})" for p in products]))]
@@ -334,10 +345,15 @@ async def handle_call_tool(name, arguments):
     except Exception as e:
         return [types.TextContent(type="text", text=f"Error: {str(e)}")]
 
+# ─── SSE Server ───────────────────────────────────────────────────────
+
 def run_sse_server():
     sse = SseServerTransport("/messages/")
 
     async def handle_sse(request: Request):
+        session_id = request.query_params.get("session_id", "unknown")
+        print(f"[SSE CONNECT] session_id={session_id} | ip={request.client.host}")
+
         async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
             await server.run(
                 streams[0], streams[1],
@@ -350,12 +366,11 @@ def run_sse_server():
                     ),
                 ),
             )
+        print(f"[SSE DISCONNECT] session_id={session_id}")
 
     app = Starlette(routes=[
-        # MCP endpoints
         Route("/sse", endpoint=handle_sse),
         Route("/messages/", endpoint=sse.handle_post_message, methods=["POST"]),
-        # REST endpoints
         Route("/revenue", endpoint=rest_revenue),
         Route("/customers", endpoint=rest_customers),
         Route("/customers/top-spenders", endpoint=rest_top_spenders),
@@ -363,14 +378,13 @@ def run_sse_server():
         Route("/orders", endpoint=rest_orders),
         Route("/abandoned", endpoint=rest_abandoned),
         Route("/products", endpoint=rest_products),
-        # Swagger docs
         Route("/docs", endpoint=rest_docs),
         Route("/openapi.json", endpoint=rest_openapi),
     ])
 
     port = int(os.getenv("PORT", 8000))
-    print(f"Starting Neolook Shopify API on http://0.0.0.0:{port}")
-    print(f"Swagger docs: http://0.0.0.0:{port}/docs")
+    print(f"✅ Neolook Shopify API running on http://0.0.0.0:{port}")
+    print(f"📖 Swagger docs: http://0.0.0.0:{port}/docs")
     uvicorn.run(app, host="0.0.0.0", port=port)
 
 async def run_stdio_server():
