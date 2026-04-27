@@ -5,3 +5,4 @@ uvicorn
 starlette
 httpx
 pymongo
+pymongo
