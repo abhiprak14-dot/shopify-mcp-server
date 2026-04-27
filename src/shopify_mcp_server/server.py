@@ -24,20 +24,20 @@ def init_shopify():
     shopify.ShopifyResource.activate_session(session)
 
 def format_customer_for_ads(c):
-    addr = c.default_address
+    addr = getattr(c, 'default_address', None)
     return (
         f"ID: {c.id}\n"
-        f"Name: {c.first_name} {c.last_name}\n"
-        f"Email: {c.email}\n"
+        f"Name: {getattr(c, 'first_name', 'N/A')} {getattr(c, 'last_name', 'N/A')}\n"
+        f"Email: {getattr(c, 'email', 'N/A')}\n"
         f"Phone: {getattr(c, 'phone', 'N/A')}\n"
         f"City: {addr.city if addr else 'N/A'}\n"
         f"State: {addr.province if addr else 'N/A'}\n"
         f"Country: {addr.country if addr else 'N/A'}\n"
-        f"Total Spent: ${c.total_spent}\n"
-        f"Orders Count: {c.orders_count}\n"
+        f"Total Spent: ${getattr(c, 'total_spent', '0.00')}\n"
+        f"Orders Count: {getattr(c, 'orders_count', 0)}\n"
         f"Accepts Marketing: {getattr(c, 'accepts_marketing', getattr(c, 'email_marketing_consent', 'N/A'))}\n"
-        f"Tags: {c.tags}\n"
-        f"Created At: {c.created_at}\n"
+        f"Tags: {getattr(c, 'tags', 'N/A')}\n"
+        f"Created At: {getattr(c, 'created_at', 'N/A')}\n"
         f"---"
     )
 
@@ -152,7 +152,7 @@ async def handle_call_tool(name, arguments):
         elif name == "get-top-spenders":
             limit = int(arguments.get("limit", 20))
             customers = shopify.Customer.find(limit=250)
-            sorted_customers = sorted(customers, key=lambda c: float(c.total_spent), reverse=True)[:limit]
+            sorted_customers = sorted(customers, key=lambda c: float(getattr(c, 'total_spent', 0)), reverse=True)[:limit]
             if not sorted_customers:
                 return [types.TextContent(type="text", text="No customers found")]
             result = f"Top {len(sorted_customers)} Spenders (Lookalike Audience):\n\n" + "\n".join([format_customer_for_ads(c) for c in sorted_customers])
@@ -161,7 +161,7 @@ async def handle_call_tool(name, arguments):
         elif name == "get-repeat-buyers":
             min_orders = int(arguments.get("min_orders", 2))
             customers = shopify.Customer.find(limit=250)
-            repeat = [c for c in customers if int(c.orders_count) >= min_orders]
+            repeat = [c for c in customers if int(getattr(c, 'orders_count', 0)) >= min_orders]
             if not repeat:
                 return [types.TextContent(type="text", text="No repeat buyers found")]
             result = f"Repeat Buyers ({len(repeat)} customers with {min_orders}+ orders):\n\n" + "\n".join([format_customer_for_ads(c) for c in repeat])
@@ -170,7 +170,7 @@ async def handle_call_tool(name, arguments):
         elif name == "get-new-customers":
             limit = int(arguments.get("limit", 20))
             customers = shopify.Customer.find(limit=limit)
-            new = [c for c in customers if int(c.orders_count) == 1]
+            new = [c for c in customers if int(getattr(c, 'orders_count', 0)) == 1]
             if not new:
                 return [types.TextContent(type="text", text="No first-time buyers found")]
             result = f"First-Time Buyers ({len(new)}):\n\n" + "\n".join([format_customer_for_ads(c) for c in new])
@@ -187,7 +187,7 @@ async def handle_call_tool(name, arguments):
         elif name == "get-non-buyers":
             limit = int(arguments.get("limit", 20))
             customers = shopify.Customer.find(limit=limit)
-            non_buyers = [c for c in customers if int(c.orders_count) == 0]
+            non_buyers = [c for c in customers if int(getattr(c, 'orders_count', 0)) == 0]
             if not non_buyers:
                 return [types.TextContent(type="text", text="No non-buyers found")]
             result = f"Non-Buyers ({len(non_buyers)}) — TOFU Retargeting:\n\n" + "\n".join([format_customer_for_ads(c) for c in non_buyers])
@@ -215,8 +215,8 @@ async def handle_call_tool(name, arguments):
             total_revenue = sum(float(o.total_price) for o in orders)
             total_customers = len(customers)
             total_orders = len(orders)
-            buyers = [c for c in customers if int(c.orders_count) > 0]
-            repeat_buyers = [c for c in customers if int(c.orders_count) >= 2]
+            buyers = [c for c in customers if int(getattr(c, 'orders_count', 0)) > 0]
+            repeat_buyers = [c for c in customers if int(getattr(c, 'orders_count', 0)) >= 2]
             marketing_opted = [c for c in customers if getattr(c, 'accepts_marketing', False) or getattr(c, 'email_marketing_consent', None)]
             avg_order = f"${total_revenue/total_orders:.2f}" if total_orders > 0 else "N/A"
             summary = (
@@ -246,11 +246,12 @@ async def handle_call_tool(name, arguments):
             customers = shopify.Customer.find(limit=250)
             groups = {}
             for c in customers:
-                if c.default_address:
-                    key = c.default_address.country if location_type == "country" else c.default_address.city
+                addr = getattr(c, 'default_address', None)
+                if addr:
+                    key = addr.country if location_type == "country" else addr.city
                     if key not in groups:
                         groups[key] = []
-                    groups[key].append(f"{c.first_name} {c.last_name} ({c.email})")
+                    groups[key].append(f"{getattr(c, 'first_name', 'N/A')} {getattr(c, 'last_name', 'N/A')} ({getattr(c, 'email', 'N/A')})")
             if not groups:
                 return [types.TextContent(type="text", text="No location data found")]
             result = f"Customers by {location_type.title()} (Geo-targeting):\n\n"
