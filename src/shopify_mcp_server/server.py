@@ -1,4 +1,6 @@
 import asyncio
+import time
+import logging
 import shopify
 from mcp.server.models import InitializationOptions
 import mcp.types as types
@@ -16,13 +18,25 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# ─── Logging Setup ────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S"
+)
+logger = logging.getLogger("neolook-shopify")
+
 server = Server("shopify")
+
+# ─── Shopify Init ─────────────────────────────────────────────────────
 
 def init_shopify():
     shop_url = os.getenv("SHOPIFY_SHOP_URL")
     access_token = os.getenv("SHOPIFY_ACCESS_TOKEN")
     session = shopify.Session(shop_url, '2025-01', access_token)
     shopify.ShopifyResource.activate_session(session)
+
+# ─── Formatters ───────────────────────────────────────────────────────
 
 def format_customer_for_ads(c):
     addr = getattr(c, 'default_address', None)
@@ -65,41 +79,63 @@ def format_abandoned(a):
         "recovery_url": getattr(a, 'abandoned_checkout_url', 'N/A'),
     }
 
-# ─── Non-blocking Shopify helpers (init inside thread) ───────────────
+# ─── Non-blocking Shopify helpers ─────────────────────────────────────
 
 async def find_customers(limit=250):
     def _find():
         init_shopify()
         return shopify.Customer.find(limit=limit)
-    return await asyncio.to_thread(_find)
+    logger.info(f"Fetching customers | limit={limit}")
+    start = time.time()
+    result = await asyncio.to_thread(_find)
+    logger.info(f"Fetched {len(result)} customers | {round(time.time()-start, 2)}s")
+    return result
 
 async def find_orders(limit=250, status="any"):
     def _find():
         init_shopify()
         return shopify.Order.find(limit=limit, status=status)
-    return await asyncio.to_thread(_find)
+    logger.info(f"Fetching orders | limit={limit} status={status}")
+    start = time.time()
+    result = await asyncio.to_thread(_find)
+    logger.info(f"Fetched {len(result)} orders | {round(time.time()-start, 2)}s")
+    return result
 
 async def find_products(limit=50):
     def _find():
         init_shopify()
         return shopify.Product.find(limit=limit)
-    return await asyncio.to_thread(_find)
+    logger.info(f"Fetching products | limit={limit}")
+    start = time.time()
+    result = await asyncio.to_thread(_find)
+    logger.info(f"Fetched {len(result)} products | {round(time.time()-start, 2)}s")
+    return result
 
 async def find_checkouts(limit=20):
     def _find():
         init_shopify()
         return shopify.Checkout.find(limit=limit)
-    return await asyncio.to_thread(_find)
+    logger.info(f"Fetching checkouts | limit={limit}")
+    start = time.time()
+    result = await asyncio.to_thread(_find)
+    logger.info(f"Fetched {len(result)} checkouts | {round(time.time()-start, 2)}s")
+    return result
 
 async def find_customer_orders(customer_id, limit=50):
     def _find():
         init_shopify()
         return shopify.Order.find(customer_id=customer_id, limit=limit)
-    return await asyncio.to_thread(_find)
+    logger.info(f"Fetching orders for customer {customer_id}")
+    start = time.time()
+    result = await asyncio.to_thread(_find)
+    logger.info(f"Fetched {len(result)} orders for customer {customer_id} | {round(time.time()-start, 2)}s")
+    return result
 
 # ─── REST Endpoints ───────────────────────────────────────────────────
 
 async def rest_revenue(request: Request):
+    start = time.time()
+    logger.info(f"[REST] GET /revenue | ip={request.client.host}")
     try:
         customers = await find_customers(250)
         orders = await find_orders(250)
@@ -109,6 +145,7 @@ async def rest_revenue(request: Request):
         buyers = [c for c in customers if int(getattr(c, 'orders_count', 0)) > 0]
         repeat_buyers = [c for c in customers if int(getattr(c, 'orders_count', 0)) >= 2]
         marketing_opted = [c for c in customers if getattr(c, 'accepts_marketing', False) or getattr(c, 'email_marketing_consent', None)]
+        logger.info(f"[REST] GET /revenue | completed in {round(time.time()-start, 2)}s")
         return JSONResponse({
             "total_customers": total_customers,
             "total_orders": total_orders,
@@ -120,56 +157,81 @@ async def rest_revenue(request: Request):
             "marketing_subscribers": len(marketing_opted),
         })
     except Exception as e:
+        logger.error(f"[REST] GET /revenue | error={str(e)}")
         return JSONResponse({"error": str(e)}, status_code=500)
 
 async def rest_customers(request: Request):
+    start = time.time()
+    limit = int(request.query_params.get("limit", 50))
+    logger.info(f"[REST] GET /customers | limit={limit} ip={request.client.host}")
     try:
-        limit = int(request.query_params.get("limit", 50))
         customers = await find_customers(limit)
+        logger.info(f"[REST] GET /customers | completed in {round(time.time()-start, 2)}s")
         return JSONResponse({"count": len(customers), "customers": [format_customer_for_ads(c) for c in customers]})
     except Exception as e:
+        logger.error(f"[REST] GET /customers | error={str(e)}")
         return JSONResponse({"error": str(e)}, status_code=500)
 
 async def rest_orders(request: Request):
+    start = time.time()
+    limit = int(request.query_params.get("limit", 20))
+    logger.info(f"[REST] GET /orders | limit={limit} ip={request.client.host}")
     try:
-        limit = int(request.query_params.get("limit", 20))
         orders = await find_orders(limit)
+        logger.info(f"[REST] GET /orders | completed in {round(time.time()-start, 2)}s")
         return JSONResponse({"count": len(orders), "orders": [format_order(o) for o in orders]})
     except Exception as e:
+        logger.error(f"[REST] GET /orders | error={str(e)}")
         return JSONResponse({"error": str(e)}, status_code=500)
 
 async def rest_abandoned(request: Request):
+    start = time.time()
+    limit = int(request.query_params.get("limit", 20))
+    logger.info(f"[REST] GET /abandoned | limit={limit} ip={request.client.host}")
     try:
-        limit = int(request.query_params.get("limit", 20))
         abandoned = await find_checkouts(limit)
+        logger.info(f"[REST] GET /abandoned | completed in {round(time.time()-start, 2)}s")
         return JSONResponse({"count": len(abandoned), "abandoned_checkouts": [format_abandoned(a) for a in abandoned]})
     except Exception as e:
+        logger.error(f"[REST] GET /abandoned | error={str(e)}")
         return JSONResponse({"error": str(e)}, status_code=500)
 
 async def rest_products(request: Request):
+    start = time.time()
+    limit = int(request.query_params.get("limit", 20))
+    logger.info(f"[REST] GET /products | limit={limit} ip={request.client.host}")
     try:
-        limit = int(request.query_params.get("limit", 20))
         products = await find_products(limit)
+        logger.info(f"[REST] GET /products | completed in {round(time.time()-start, 2)}s")
         return JSONResponse({"count": len(products), "products": [{"id": p.id, "title": p.title, "price": p.variants[0].price if p.variants else 'N/A', "status": p.status} for p in products]})
     except Exception as e:
+        logger.error(f"[REST] GET /products | error={str(e)}")
         return JSONResponse({"error": str(e)}, status_code=500)
 
 async def rest_top_spenders(request: Request):
+    start = time.time()
+    limit = int(request.query_params.get("limit", 20))
+    logger.info(f"[REST] GET /customers/top-spenders | limit={limit} ip={request.client.host}")
     try:
-        limit = int(request.query_params.get("limit", 20))
         customers = await find_customers(250)
         sorted_customers = sorted(customers, key=lambda c: float(getattr(c, 'total_spent', 0)), reverse=True)[:limit]
+        logger.info(f"[REST] GET /customers/top-spenders | completed in {round(time.time()-start, 2)}s")
         return JSONResponse({"count": len(sorted_customers), "top_spenders": [format_customer_for_ads(c) for c in sorted_customers]})
     except Exception as e:
+        logger.error(f"[REST] GET /customers/top-spenders | error={str(e)}")
         return JSONResponse({"error": str(e)}, status_code=500)
 
 async def rest_subscribers(request: Request):
+    start = time.time()
+    limit = int(request.query_params.get("limit", 50))
+    logger.info(f"[REST] GET /customers/subscribers | limit={limit} ip={request.client.host}")
     try:
-        limit = int(request.query_params.get("limit", 50))
         customers = await find_customers(limit)
         subscribers = [c for c in customers if getattr(c, 'accepts_marketing', False) or getattr(c, 'email_marketing_consent', None)]
+        logger.info(f"[REST] GET /customers/subscribers | completed in {round(time.time()-start, 2)}s")
         return JSONResponse({"count": len(subscribers), "subscribers": [format_customer_for_ads(c) for c in subscribers]})
     except Exception as e:
+        logger.error(f"[REST] GET /customers/subscribers | error={str(e)}")
         return JSONResponse({"error": str(e)}, status_code=500)
 
 async def rest_docs(request: Request):
@@ -236,18 +298,22 @@ async def handle_list_tools() -> list[types.Tool]:
 async def handle_call_tool(name, arguments):
     if not arguments:
         arguments = {}
+    start = time.time()
+    logger.info(f"[MCP] Tool called: {name} | args={arguments}")
     try:
         if name == "get-customers-for-ads":
             limit = int(arguments.get("limit", 50))
             customers = await find_customers(limit)
             if not customers:
                 return [types.TextContent(type="text", text="No customers found")]
+            logger.info(f"[MCP] {name} completed in {round(time.time()-start, 2)}s")
             return [types.TextContent(type="text", text=str([format_customer_for_ads(c) for c in customers]))]
 
         elif name == "get-top-spenders":
             limit = int(arguments.get("limit", 20))
             customers = await find_customers(250)
             sorted_customers = sorted(customers, key=lambda c: float(getattr(c, 'total_spent', 0)), reverse=True)[:limit]
+            logger.info(f"[MCP] {name} completed in {round(time.time()-start, 2)}s")
             return [types.TextContent(type="text", text=str([format_customer_for_ads(c) for c in sorted_customers]))]
 
         elif name == "get-repeat-buyers":
@@ -256,6 +322,7 @@ async def handle_call_tool(name, arguments):
             repeat = [c for c in customers if int(getattr(c, 'orders_count', 0)) >= min_orders]
             if not repeat:
                 return [types.TextContent(type="text", text="No repeat buyers found")]
+            logger.info(f"[MCP] {name} completed in {round(time.time()-start, 2)}s")
             return [types.TextContent(type="text", text=str([format_customer_for_ads(c) for c in repeat]))]
 
         elif name == "get-new-customers":
@@ -264,6 +331,7 @@ async def handle_call_tool(name, arguments):
             new = [c for c in customers if int(getattr(c, 'orders_count', 0)) == 1]
             if not new:
                 return [types.TextContent(type="text", text="No first-time buyers found")]
+            logger.info(f"[MCP] {name} completed in {round(time.time()-start, 2)}s")
             return [types.TextContent(type="text", text=str([format_customer_for_ads(c) for c in new]))]
 
         elif name == "get-abandoned-checkouts":
@@ -271,6 +339,7 @@ async def handle_call_tool(name, arguments):
             abandoned = await find_checkouts(limit)
             if not abandoned:
                 return [types.TextContent(type="text", text="No abandoned checkouts found")]
+            logger.info(f"[MCP] {name} completed in {round(time.time()-start, 2)}s")
             return [types.TextContent(type="text", text=str([format_abandoned(a) for a in abandoned]))]
 
         elif name == "get-non-buyers":
@@ -279,6 +348,7 @@ async def handle_call_tool(name, arguments):
             non_buyers = [c for c in customers if int(getattr(c, 'orders_count', 0)) == 0]
             if not non_buyers:
                 return [types.TextContent(type="text", text="No non-buyers found")]
+            logger.info(f"[MCP] {name} completed in {round(time.time()-start, 2)}s")
             return [types.TextContent(type="text", text=str([format_customer_for_ads(c) for c in non_buyers]))]
 
         elif name == "get-customer-orders":
@@ -286,6 +356,7 @@ async def handle_call_tool(name, arguments):
             orders = await find_customer_orders(customer_id)
             if not orders:
                 return [types.TextContent(type="text", text=f"No orders found for customer {customer_id}")]
+            logger.info(f"[MCP] {name} completed in {round(time.time()-start, 2)}s")
             return [types.TextContent(type="text", text=str([format_order(o) for o in orders]))]
 
         elif name == "get-all-orders":
@@ -293,6 +364,7 @@ async def handle_call_tool(name, arguments):
             orders = await find_orders(limit)
             if not orders:
                 return [types.TextContent(type="text", text="No orders found")]
+            logger.info(f"[MCP] {name} completed in {round(time.time()-start, 2)}s")
             return [types.TextContent(type="text", text=str([format_order(o) for o in orders]))]
 
         elif name == "get-revenue-summary":
@@ -316,6 +388,7 @@ async def handle_call_tool(name, arguments):
                 f"Non-Buyers: {total_customers - len(buyers)}\n"
                 f"Marketing Subscribers: {len(marketing_opted)}\n"
             )
+            logger.info(f"[MCP] {name} completed in {round(time.time()-start, 2)}s")
             return [types.TextContent(type="text", text=summary)]
 
         elif name == "get-marketing-subscribers":
@@ -324,6 +397,7 @@ async def handle_call_tool(name, arguments):
             subscribers = [c for c in customers if getattr(c, 'accepts_marketing', False) or getattr(c, 'email_marketing_consent', None)]
             if not subscribers:
                 return [types.TextContent(type="text", text="No marketing subscribers found")]
+            logger.info(f"[MCP] {name} completed in {round(time.time()-start, 2)}s")
             return [types.TextContent(type="text", text=str([format_customer_for_ads(c) for c in subscribers]))]
 
         elif name == "get-customers-by-location":
@@ -340,6 +414,7 @@ async def handle_call_tool(name, arguments):
             if not groups:
                 return [types.TextContent(type="text", text="No location data found")]
             result = "\n".join([f"{loc}: {len(names)} customers" for loc, names in sorted(groups.items(), key=lambda x: len(x[1]), reverse=True)])
+            logger.info(f"[MCP] {name} completed in {round(time.time()-start, 2)}s")
             return [types.TextContent(type="text", text=result)]
 
         elif name == "get-product-list":
@@ -347,12 +422,14 @@ async def handle_call_tool(name, arguments):
             products = await find_products(limit)
             if not products:
                 return [types.TextContent(type="text", text="No products found")]
+            logger.info(f"[MCP] {name} completed in {round(time.time()-start, 2)}s")
             return [types.TextContent(type="text", text="\n".join([f"{p.title} - ${p.variants[0].price if p.variants else 'N/A'} ({p.status})" for p in products]))]
 
         else:
             raise ValueError(f"Unknown tool: {name}")
 
     except Exception as e:
+        logger.error(f"[MCP] {name} failed | error={str(e)} | {round(time.time()-start, 2)}s")
         return [types.TextContent(type="text", text=f"Error: {str(e)}")]
 
 # ─── SSE Server ───────────────────────────────────────────────────────
@@ -362,20 +439,25 @@ def run_sse_server():
 
     async def handle_sse(request: Request):
         session_id = request.query_params.get("session_id", "unknown")
-        print(f"[SSE CONNECT] session_id={session_id} | ip={request.client.host}")
-        async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
-            await server.run(
-                streams[0], streams[1],
-                InitializationOptions(
-                    server_name="shopify",
-                    server_version="1.0.0",
-                    capabilities=server.get_capabilities(
-                        notification_options=NotificationOptions(),
-                        experimental_capabilities={},
+        client_ip = request.client.host
+        logger.info(f"[SSE CONNECT] session_id={session_id} | ip={client_ip}")
+        try:
+            async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
+                await server.run(
+                    streams[0], streams[1],
+                    InitializationOptions(
+                        server_name="shopify",
+                        server_version="1.0.0",
+                        capabilities=server.get_capabilities(
+                            notification_options=NotificationOptions(),
+                            experimental_capabilities={},
+                        ),
                     ),
-                ),
-            )
-        print(f"[SSE DISCONNECT] session_id={session_id}")
+                )
+        except Exception as e:
+            logger.error(f"[SSE ERROR] session_id={session_id} | error={str(e)}")
+        finally:
+            logger.info(f"[SSE DISCONNECT] session_id={session_id} | ip={client_ip}")
 
     app = Starlette(routes=[
         Route("/sse", endpoint=handle_sse),
@@ -392,8 +474,8 @@ def run_sse_server():
     ])
 
     port = int(os.getenv("PORT", 8000))
-    print(f"✅ Neolook Shopify API running on http://0.0.0.0:{port}")
-    print(f"📖 Swagger docs: http://0.0.0.0:{port}/docs")
+    logger.info(f"✅ Neolook Shopify API starting on port {port}")
+    logger.info(f"📖 Swagger docs available at /docs")
     uvicorn.run(app, host="0.0.0.0", port=port)
 
 async def run_stdio_server():
