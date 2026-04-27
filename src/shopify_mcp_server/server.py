@@ -65,27 +65,37 @@ def format_abandoned(a):
         "recovery_url": getattr(a, 'abandoned_checkout_url', 'N/A'),
     }
 
-# ─── Shopify helpers (non-blocking) ──────────────────────────────────
+# ─── Non-blocking Shopify helpers (init inside thread) ───────────────
 
 async def find_customers(limit=250):
-    init_shopify()
-    return await asyncio.to_thread(shopify.Customer.find, limit=limit)
+    def _find():
+        init_shopify()
+        return shopify.Customer.find(limit=limit)
+    return await asyncio.to_thread(_find)
 
 async def find_orders(limit=250, status="any"):
-    init_shopify()
-    return await asyncio.to_thread(shopify.Order.find, limit=limit, status=status)
+    def _find():
+        init_shopify()
+        return shopify.Order.find(limit=limit, status=status)
+    return await asyncio.to_thread(_find)
 
 async def find_products(limit=50):
-    init_shopify()
-    return await asyncio.to_thread(shopify.Product.find, limit=limit)
+    def _find():
+        init_shopify()
+        return shopify.Product.find(limit=limit)
+    return await asyncio.to_thread(_find)
 
 async def find_checkouts(limit=20):
-    init_shopify()
-    return await asyncio.to_thread(shopify.Checkout.find, limit=limit)
+    def _find():
+        init_shopify()
+        return shopify.Checkout.find(limit=limit)
+    return await asyncio.to_thread(_find)
 
 async def find_customer_orders(customer_id, limit=50):
-    init_shopify()
-    return await asyncio.to_thread(shopify.Order.find, customer_id=customer_id, limit=limit)
+    def _find():
+        init_shopify()
+        return shopify.Order.find(customer_id=customer_id, limit=limit)
+    return await asyncio.to_thread(_find)
 
 # ─── REST Endpoints ───────────────────────────────────────────────────
 
@@ -353,7 +363,6 @@ def run_sse_server():
     async def handle_sse(request: Request):
         session_id = request.query_params.get("session_id", "unknown")
         print(f"[SSE CONNECT] session_id={session_id} | ip={request.client.host}")
-
         async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
             await server.run(
                 streams[0], streams[1],
