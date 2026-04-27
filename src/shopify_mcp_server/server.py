@@ -1,7 +1,9 @@
 import asyncio
 import time
 import logging
+from datetime import datetime, timezone
 import shopify
+from pymongo import MongoClient
 from mcp.server.models import InitializationOptions
 import mcp.types as types
 from mcp.server.lowlevel import NotificationOptions, Server
@@ -26,7 +28,40 @@ logging.basicConfig(
 )
 logger = logging.getLogger("neolook-shopify")
 
+# ─── MongoDB Setup ────────────────────────────────────────────────────
+def get_mongo_collection():
+    try:
+        client = MongoClient(os.getenv("MONGODB_URI"))
+        db = client["neolook"]
+        return db["logs"]
+    except Exception as e:
+        logger.error(f"MongoDB connection error: {e}")
+        return None
+
+def log_to_mongo(session_id, ip_address, tool, input_args, output_summary, status, error_message, response_time_ms):
+    try:
+        collection = get_mongo_collection()
+        if collection is None:
+            return
+        collection.insert_one({
+            "datetime": datetime.now(timezone.utc),
+            "session_id": session_id,
+            "ip_address": ip_address,
+            "tool": tool,
+            "input": input_args,
+            "output_summary": output_summary,
+            "status": status,
+            "error_message": error_message,
+            "response_time_ms": response_time_ms,
+        })
+        logger.info(f"[MONGO] Logged: {tool} | {status} | {response_time_ms}ms")
+    except Exception as e:
+        logger.error(f"[MONGO] Failed to log: {e}")
+
 server = Server("shopify")
+
+# Store session metadata
+_session_meta = {}
 
 # ─── Shopify Init ─────────────────────────────────────────────────────
 
@@ -299,72 +334,84 @@ async def handle_call_tool(name, arguments):
     if not arguments:
         arguments = {}
     start = time.time()
+    session_id = "unknown"
+    ip_address = "unknown"
     logger.info(f"[MCP] Tool called: {name} | args={arguments}")
+
     try:
         if name == "get-customers-for-ads":
             limit = int(arguments.get("limit", 50))
             customers = await find_customers(limit)
+            result = [format_customer_for_ads(c) for c in customers] if customers else []
+            elapsed = round((time.time()-start)*1000)
+            log_to_mongo(session_id, ip_address, name, arguments, f"{len(result)} customers returned", "success", None, elapsed)
             if not customers:
                 return [types.TextContent(type="text", text="No customers found")]
-            logger.info(f"[MCP] {name} completed in {round(time.time()-start, 2)}s")
-            return [types.TextContent(type="text", text=str([format_customer_for_ads(c) for c in customers]))]
+            return [types.TextContent(type="text", text=str(result))]
 
         elif name == "get-top-spenders":
             limit = int(arguments.get("limit", 20))
             customers = await find_customers(250)
             sorted_customers = sorted(customers, key=lambda c: float(getattr(c, 'total_spent', 0)), reverse=True)[:limit]
-            logger.info(f"[MCP] {name} completed in {round(time.time()-start, 2)}s")
+            elapsed = round((time.time()-start)*1000)
+            log_to_mongo(session_id, ip_address, name, arguments, f"{len(sorted_customers)} top spenders returned", "success", None, elapsed)
             return [types.TextContent(type="text", text=str([format_customer_for_ads(c) for c in sorted_customers]))]
 
         elif name == "get-repeat-buyers":
             min_orders = int(arguments.get("min_orders", 2))
             customers = await find_customers(250)
             repeat = [c for c in customers if int(getattr(c, 'orders_count', 0)) >= min_orders]
+            elapsed = round((time.time()-start)*1000)
+            log_to_mongo(session_id, ip_address, name, arguments, f"{len(repeat)} repeat buyers returned", "success", None, elapsed)
             if not repeat:
                 return [types.TextContent(type="text", text="No repeat buyers found")]
-            logger.info(f"[MCP] {name} completed in {round(time.time()-start, 2)}s")
             return [types.TextContent(type="text", text=str([format_customer_for_ads(c) for c in repeat]))]
 
         elif name == "get-new-customers":
             limit = int(arguments.get("limit", 20))
             customers = await find_customers(limit)
             new = [c for c in customers if int(getattr(c, 'orders_count', 0)) == 1]
+            elapsed = round((time.time()-start)*1000)
+            log_to_mongo(session_id, ip_address, name, arguments, f"{len(new)} new customers returned", "success", None, elapsed)
             if not new:
                 return [types.TextContent(type="text", text="No first-time buyers found")]
-            logger.info(f"[MCP] {name} completed in {round(time.time()-start, 2)}s")
             return [types.TextContent(type="text", text=str([format_customer_for_ads(c) for c in new]))]
 
         elif name == "get-abandoned-checkouts":
             limit = int(arguments.get("limit", 20))
             abandoned = await find_checkouts(limit)
+            elapsed = round((time.time()-start)*1000)
+            log_to_mongo(session_id, ip_address, name, arguments, f"{len(abandoned)} abandoned checkouts returned", "success", None, elapsed)
             if not abandoned:
                 return [types.TextContent(type="text", text="No abandoned checkouts found")]
-            logger.info(f"[MCP] {name} completed in {round(time.time()-start, 2)}s")
             return [types.TextContent(type="text", text=str([format_abandoned(a) for a in abandoned]))]
 
         elif name == "get-non-buyers":
             limit = int(arguments.get("limit", 20))
             customers = await find_customers(limit)
             non_buyers = [c for c in customers if int(getattr(c, 'orders_count', 0)) == 0]
+            elapsed = round((time.time()-start)*1000)
+            log_to_mongo(session_id, ip_address, name, arguments, f"{len(non_buyers)} non-buyers returned", "success", None, elapsed)
             if not non_buyers:
                 return [types.TextContent(type="text", text="No non-buyers found")]
-            logger.info(f"[MCP] {name} completed in {round(time.time()-start, 2)}s")
             return [types.TextContent(type="text", text=str([format_customer_for_ads(c) for c in non_buyers]))]
 
         elif name == "get-customer-orders":
             customer_id = arguments.get("customer_id")
             orders = await find_customer_orders(customer_id)
+            elapsed = round((time.time()-start)*1000)
+            log_to_mongo(session_id, ip_address, name, arguments, f"{len(orders)} orders returned for customer {customer_id}", "success", None, elapsed)
             if not orders:
                 return [types.TextContent(type="text", text=f"No orders found for customer {customer_id}")]
-            logger.info(f"[MCP] {name} completed in {round(time.time()-start, 2)}s")
             return [types.TextContent(type="text", text=str([format_order(o) for o in orders]))]
 
         elif name == "get-all-orders":
             limit = int(arguments.get("limit", 20))
             orders = await find_orders(limit)
+            elapsed = round((time.time()-start)*1000)
+            log_to_mongo(session_id, ip_address, name, arguments, f"{len(orders)} orders returned", "success", None, elapsed)
             if not orders:
                 return [types.TextContent(type="text", text="No orders found")]
-            logger.info(f"[MCP] {name} completed in {round(time.time()-start, 2)}s")
             return [types.TextContent(type="text", text=str([format_order(o) for o in orders]))]
 
         elif name == "get-revenue-summary":
@@ -388,16 +435,18 @@ async def handle_call_tool(name, arguments):
                 f"Non-Buyers: {total_customers - len(buyers)}\n"
                 f"Marketing Subscribers: {len(marketing_opted)}\n"
             )
-            logger.info(f"[MCP] {name} completed in {round(time.time()-start, 2)}s")
+            elapsed = round((time.time()-start)*1000)
+            log_to_mongo(session_id, ip_address, name, arguments, f"Revenue: ${total_revenue:.2f} | Customers: {total_customers} | Orders: {total_orders}", "success", None, elapsed)
             return [types.TextContent(type="text", text=summary)]
 
         elif name == "get-marketing-subscribers":
             limit = int(arguments.get("limit", 50))
             customers = await find_customers(limit)
             subscribers = [c for c in customers if getattr(c, 'accepts_marketing', False) or getattr(c, 'email_marketing_consent', None)]
+            elapsed = round((time.time()-start)*1000)
+            log_to_mongo(session_id, ip_address, name, arguments, f"{len(subscribers)} subscribers returned", "success", None, elapsed)
             if not subscribers:
                 return [types.TextContent(type="text", text="No marketing subscribers found")]
-            logger.info(f"[MCP] {name} completed in {round(time.time()-start, 2)}s")
             return [types.TextContent(type="text", text=str([format_customer_for_ads(c) for c in subscribers]))]
 
         elif name == "get-customers-by-location":
@@ -411,25 +460,29 @@ async def handle_call_tool(name, arguments):
                     if key not in groups:
                         groups[key] = []
                     groups[key].append(f"{getattr(c, 'first_name', 'N/A')} {getattr(c, 'last_name', 'N/A')}")
+            result = "\n".join([f"{loc}: {len(names)} customers" for loc, names in sorted(groups.items(), key=lambda x: len(x[1]), reverse=True)])
+            elapsed = round((time.time()-start)*1000)
+            log_to_mongo(session_id, ip_address, name, arguments, f"{len(groups)} locations returned", "success", None, elapsed)
             if not groups:
                 return [types.TextContent(type="text", text="No location data found")]
-            result = "\n".join([f"{loc}: {len(names)} customers" for loc, names in sorted(groups.items(), key=lambda x: len(x[1]), reverse=True)])
-            logger.info(f"[MCP] {name} completed in {round(time.time()-start, 2)}s")
             return [types.TextContent(type="text", text=result)]
 
         elif name == "get-product-list":
             limit = int(arguments.get("limit", 10))
             products = await find_products(limit)
+            elapsed = round((time.time()-start)*1000)
+            log_to_mongo(session_id, ip_address, name, arguments, f"{len(products)} products returned", "success", None, elapsed)
             if not products:
                 return [types.TextContent(type="text", text="No products found")]
-            logger.info(f"[MCP] {name} completed in {round(time.time()-start, 2)}s")
             return [types.TextContent(type="text", text="\n".join([f"{p.title} - ${p.variants[0].price if p.variants else 'N/A'} ({p.status})" for p in products]))]
 
         else:
             raise ValueError(f"Unknown tool: {name}")
 
     except Exception as e:
-        logger.error(f"[MCP] {name} failed | error={str(e)} | {round(time.time()-start, 2)}s")
+        elapsed = round((time.time()-start)*1000)
+        logger.error(f"[MCP] {name} failed | error={str(e)} | {elapsed}ms")
+        log_to_mongo(session_id, ip_address, name, arguments, None, "error", str(e), elapsed)
         return [types.TextContent(type="text", text=f"Error: {str(e)}")]
 
 # ─── SSE Server ───────────────────────────────────────────────────────
