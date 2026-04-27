@@ -218,12 +218,13 @@ async def handle_call_tool(name, arguments):
             buyers = [c for c in customers if int(c.orders_count) > 0]
             repeat_buyers = [c for c in customers if int(c.orders_count) >= 2]
             marketing_opted = [c for c in customers if getattr(c, 'accepts_marketing', False) or getattr(c, 'email_marketing_consent', None)]
+            avg_order = f"${total_revenue/total_orders:.2f}" if total_orders > 0 else "N/A"
             summary = (
                 f"=== Neolook Store Revenue Summary ===\n\n"
                 f"Total Customers: {total_customers}\n"
                 f"Total Orders: {total_orders}\n"
                 f"Total Revenue: ${total_revenue:.2f}\n"
-                f"Average Order Value: ${total_revenue/total_orders:.2f}\n\n"
+                f"Average Order Value: {avg_order}\n\n"
                 f"Buyers: {len(buyers)}\n"
                 f"Repeat Buyers: {len(repeat_buyers)}\n"
                 f"Non-Buyers: {total_customers - len(buyers)}\n"
@@ -234,7 +235,7 @@ async def handle_call_tool(name, arguments):
         elif name == "get-marketing-subscribers":
             limit = int(arguments.get("limit", 50))
             customers = shopify.Customer.find(limit=limit)
-            subscribers = [c for c in customers if c.accepts_marketing]
+            subscribers = [c for c in customers if getattr(c, 'accepts_marketing', False) or getattr(c, 'email_marketing_consent', None)]
             if not subscribers:
                 return [types.TextContent(type="text", text="No marketing subscribers found")]
             result = f"Marketing Subscribers ({len(subscribers)}) — Safe to Target:\n\n" + "\n".join([format_customer_for_ads(c) for c in subscribers])
