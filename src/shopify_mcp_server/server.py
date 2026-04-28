@@ -3,6 +3,7 @@ import time
 import logging
 from datetime import datetime, timezone
 from functools import lru_cache
+from cachetools import TTLCache
 import shopify
 from pymongo import MongoClient
 from mcp.server.models import InitializationOptions
@@ -21,12 +22,19 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# ─── Environment Validation ───────────────────────────────────────────
+REQUIRED_ENV = ["SHOPIFY_SHOP_URL", "SHOPIFY_ACCESS_TOKEN", "MONGODB_URI"]
+for var in REQUIRED_ENV:
+    if not os.getenv(var):
+        raise RuntimeError(f"[STARTUP] Missing required environment variable: {var}")
+
 # ─── Logging ──────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
 logger = logging.getLogger("neolook-shopify")
+logger.info("[STARTUP] Environment validated. Starting server...")
 
 # ─── MongoDB (Singleton + Async) ──────────────────────────────────────
 @lru_cache()
@@ -39,9 +47,10 @@ def get_mongo_collection():
             serverSelectionTimeoutMS=5000
         )
         db = client["neolook"]
+        logger.info("[MONGO] Connected successfully")
         return db["logs"]
     except Exception as e:
-        logger.error(f"MongoDB connection error: {e}")
+        logger.error(f"[MONGO] Connection error: {e}")
         return None
 
 async def log_to_mongo(session_id, ip_address, tool, input_args, output_summary, status, error_message, response_time_ms):
@@ -62,14 +71,18 @@ async def log_to_mongo(session_id, ip_address, tool, input_args, output_summary,
                 "response_time_ms": response_time_ms,
             })
         except Exception as e:
-            logger.error(f"[MONGO] Failed: {e}")
+            logger.error(f"[MONGO] Failed to log: {e}")
     await asyncio.to_thread(_log)
 
 # ─── MCP Server ───────────────────────────────────────────────────────
 server = Server("shopify")
-
-# Session store
 _session_meta = {}
+
+# ─── Thread Limiter ───────────────────────────────────────────────────
+thread_limiter = asyncio.Semaphore(20)
+
+# ─── TTL Cache (60s) ──────────────────────────────────────────────────
+_cache = TTLCache(maxsize=50, ttl=60)
 
 # ─── Shopify Init ─────────────────────────────────────────────────────
 def init_shopify():
@@ -80,54 +93,108 @@ def init_shopify():
     )
     shopify.ShopifyResource.activate_session(session)
 
-# ─── Safe Shopify Wrapper ─────────────────────────────────────────────
-async def safe_shopify_call(fn):
+# ─── Safe Float ───────────────────────────────────────────────────────
+def safe_float(val):
     try:
-        return await asyncio.wait_for(fn(), timeout=10)
-    except Exception as e:
-        logger.error(f"[SHOPIFY ERROR] {e}")
-        return []
+        return float(val)
+    except:
+        return 0.0
 
-# ─── Shopify Helpers ──────────────────────────────────────────────────
+# ─── Safe Shopify Wrapper (retry + backoff) ───────────────────────────
+async def safe_shopify_call(fn, retries=3):
+    for attempt in range(retries):
+        try:
+            async with thread_limiter:
+                return await asyncio.wait_for(fn(), timeout=10)
+        except asyncio.TimeoutError:
+            logger.warning(f"[SHOPIFY TIMEOUT] attempt={attempt+1}")
+        except Exception as e:
+            error_str = str(e)
+            if "429" in error_str:
+                logger.warning(f"[SHOPIFY RATE LIMIT] attempt={attempt+1}")
+            elif "401" in error_str or "403" in error_str:
+                logger.error(f"[SHOPIFY AUTH ERROR] {e}")
+                return []
+            else:
+                logger.warning(f"[SHOPIFY ERROR] attempt={attempt+1} | {e}")
+        if attempt < retries - 1:
+            await asyncio.sleep(2 ** attempt)
+    logger.error("[SHOPIFY FAILED AFTER RETRIES]")
+    return []
+
+# ─── Shopify Helpers (with cache) ─────────────────────────────────────
 async def find_customers(limit=250):
+    key = f"customers_{limit}"
+    if key in _cache:
+        logger.info(f"[CACHE HIT] customers limit={limit}")
+        return _cache[key]
     async def _run():
         def _find():
             init_shopify()
             return shopify.Customer.find(limit=limit)
         return await asyncio.to_thread(_find)
-    return await safe_shopify_call(_run)
+    result = await safe_shopify_call(_run)
+    _cache[key] = result
+    logger.info(f"[SHOPIFY] Fetched {len(result)} customers")
+    return result
 
 async def find_orders(limit=250, status="any"):
+    key = f"orders_{limit}_{status}"
+    if key in _cache:
+        logger.info(f"[CACHE HIT] orders limit={limit}")
+        return _cache[key]
     async def _run():
         def _find():
             init_shopify()
             return shopify.Order.find(limit=limit, status=status)
         return await asyncio.to_thread(_find)
-    return await safe_shopify_call(_run)
+    result = await safe_shopify_call(_run)
+    _cache[key] = result
+    logger.info(f"[SHOPIFY] Fetched {len(result)} orders")
+    return result
 
 async def find_products(limit=50):
+    key = f"products_{limit}"
+    if key in _cache:
+        logger.info(f"[CACHE HIT] products limit={limit}")
+        return _cache[key]
     async def _run():
         def _find():
             init_shopify()
             return shopify.Product.find(limit=limit)
         return await asyncio.to_thread(_find)
-    return await safe_shopify_call(_run)
+    result = await safe_shopify_call(_run)
+    _cache[key] = result
+    logger.info(f"[SHOPIFY] Fetched {len(result)} products")
+    return result
 
 async def find_checkouts(limit=20):
+    key = f"checkouts_{limit}"
+    if key in _cache:
+        logger.info(f"[CACHE HIT] checkouts limit={limit}")
+        return _cache[key]
     async def _run():
         def _find():
             init_shopify()
             return shopify.Checkout.find(limit=limit)
         return await asyncio.to_thread(_find)
-    return await safe_shopify_call(_run)
+    result = await safe_shopify_call(_run)
+    _cache[key] = result
+    logger.info(f"[SHOPIFY] Fetched {len(result)} checkouts")
+    return result
 
 async def find_customer_orders(customer_id, limit=50):
+    key = f"customer_orders_{customer_id}_{limit}"
+    if key in _cache:
+        return _cache[key]
     async def _run():
         def _find():
             init_shopify()
             return shopify.Order.find(customer_id=customer_id, limit=limit)
         return await asyncio.to_thread(_find)
-    return await safe_shopify_call(_run)
+    result = await safe_shopify_call(_run)
+    _cache[key] = result
+    return result
 
 # ─── Formatters ───────────────────────────────────────────────────────
 def format_customer_for_ads(c):
@@ -140,7 +207,7 @@ def format_customer_for_ads(c):
         "city": getattr(addr, 'city', 'N/A') if addr else 'N/A',
         "state": getattr(addr, 'province', 'N/A') if addr else 'N/A',
         "country": getattr(addr, 'country', 'N/A') if addr else 'N/A',
-        "total_spent": getattr(c, 'total_spent', '0.00'),
+        "total_spent": safe_float(getattr(c, 'total_spent', 0)),
         "orders_count": getattr(c, 'orders_count', 0),
         "accepts_marketing": str(getattr(c, 'accepts_marketing', getattr(c, 'email_marketing_consent', 'N/A'))),
         "tags": getattr(c, 'tags', 'N/A'),
@@ -148,45 +215,62 @@ def format_customer_for_ads(c):
     }
 
 def format_order(o):
+    items = []
+    try:
+        items = [i.title for i in o.line_items] if o.line_items else []
+    except:
+        pass
     return {
         "order_id": o.id,
-        "order_number": o.order_number,
+        "order_number": getattr(o, 'order_number', 'N/A'),
         "email": getattr(o, 'email', 'N/A'),
-        "total": o.total_price,
-        "financial_status": o.financial_status,
+        "total": safe_float(getattr(o, 'total_price', 0)),
+        "financial_status": getattr(o, 'financial_status', 'N/A'),
         "fulfillment_status": getattr(o, 'fulfillment_status', 'N/A'),
-        "items": [i.title for i in o.line_items] if o.line_items else [],
+        "items": items,
         "source": getattr(o, 'referring_site', 'N/A'),
-        "created_at": o.created_at,
+        "created_at": getattr(o, 'created_at', 'N/A'),
     }
 
 def format_abandoned(a):
+    items = []
+    try:
+        items = [i.title for i in a.line_items] if getattr(a, 'line_items', None) else []
+    except:
+        pass
     return {
         "checkout_id": a.id,
         "email": getattr(a, 'email', 'N/A'),
         "phone": getattr(a, 'phone', 'N/A'),
-        "total": getattr(a, 'total_price', '0.00'),
-        "items": [i.title for i in a.line_items] if getattr(a, 'line_items', None) else [],
+        "total": safe_float(getattr(a, 'total_price', 0)),
+        "items": items,
         "abandoned_at": getattr(a, 'created_at', 'N/A'),
         "recovery_url": getattr(a, 'abandoned_checkout_url', 'N/A'),
     }
+
+# ─── Standardized Response ────────────────────────────────────────────
+def success_response(data, meta=None):
+    return {"success": True, "data": data, "meta": meta or {}}
+
+def error_response(message):
+    return {"success": False, "error": message}
 
 # ─── MCP Tools ───────────────────────────────────────────────────────
 @server.list_tools()
 async def handle_list_tools() -> list[types.Tool]:
     return [
-        types.Tool(name="get-customers-for-ads", description="Get full customer profiles optimized for Meta/Google ad targeting", inputSchema={"type": "object", "properties": {"limit": {"type": "number"}}}),
-        types.Tool(name="get-top-spenders", description="Get highest value customers by total spend", inputSchema={"type": "object", "properties": {"limit": {"type": "number"}}}),
-        types.Tool(name="get-repeat-buyers", description="Get customers with 2+ orders", inputSchema={"type": "object", "properties": {"min_orders": {"type": "number"}}}),
-        types.Tool(name="get-new-customers", description="Get first-time buyers", inputSchema={"type": "object", "properties": {"limit": {"type": "number"}}}),
-        types.Tool(name="get-abandoned-checkouts", description="Get abandoned carts", inputSchema={"type": "object", "properties": {"limit": {"type": "number"}}}),
-        types.Tool(name="get-non-buyers", description="Get customers who never ordered", inputSchema={"type": "object", "properties": {"limit": {"type": "number"}}}),
-        types.Tool(name="get-customer-orders", description="Get order history for a customer", inputSchema={"type": "object", "required": ["customer_id"], "properties": {"customer_id": {"type": "string"}}}),
-        types.Tool(name="get-all-orders", description="Get all store orders", inputSchema={"type": "object", "properties": {"limit": {"type": "number"}}}),
-        types.Tool(name="get-revenue-summary", description="Get store revenue metrics", inputSchema={"type": "object", "properties": {}}),
-        types.Tool(name="get-marketing-subscribers", description="Get marketing opted-in customers", inputSchema={"type": "object", "properties": {"limit": {"type": "number"}}}),
-        types.Tool(name="get-customers-by-location", description="Get customers by location", inputSchema={"type": "object", "properties": {"location_type": {"type": "string"}}}),
-        types.Tool(name="get-product-list", description="Get product list", inputSchema={"type": "object", "properties": {"limit": {"type": "number"}}}),
+        types.Tool(name="get-customers-for-ads", description="Get full customer profiles optimized for Meta/Google ad targeting", inputSchema={"type": "object", "properties": {"limit": {"type": "number", "description": "Max customers (1-250, default 50)"}}}),
+        types.Tool(name="get-top-spenders", description="Get highest value customers for lookalike audiences", inputSchema={"type": "object", "properties": {"limit": {"type": "number"}}}),
+        types.Tool(name="get-repeat-buyers", description="Get customers with 2+ orders for retention campaigns", inputSchema={"type": "object", "properties": {"min_orders": {"type": "number"}}}),
+        types.Tool(name="get-new-customers", description="Get first-time buyers for onboarding campaigns", inputSchema={"type": "object", "properties": {"limit": {"type": "number"}}}),
+        types.Tool(name="get-abandoned-checkouts", description="Get abandoned carts for re-engagement campaigns", inputSchema={"type": "object", "properties": {"limit": {"type": "number"}}}),
+        types.Tool(name="get-non-buyers", description="Get customers who never ordered for TOFU retargeting", inputSchema={"type": "object", "properties": {"limit": {"type": "number"}}}),
+        types.Tool(name="get-customer-orders", description="Get full order history for a specific customer", inputSchema={"type": "object", "required": ["customer_id"], "properties": {"customer_id": {"type": "string"}}}),
+        types.Tool(name="get-all-orders", description="Get all store orders for campaign attribution", inputSchema={"type": "object", "properties": {"limit": {"type": "number"}}}),
+        types.Tool(name="get-revenue-summary", description="Get overall store revenue metrics", inputSchema={"type": "object", "properties": {}}),
+        types.Tool(name="get-marketing-subscribers", description="Get marketing opted-in customers for safe outreach", inputSchema={"type": "object", "properties": {"limit": {"type": "number"}}}),
+        types.Tool(name="get-customers-by-location", description="Get customers grouped by location for geo-targeting", inputSchema={"type": "object", "properties": {"location_type": {"type": "string", "description": "country or city"}}}),
+        types.Tool(name="get-product-list", description="Get product list from the store", inputSchema={"type": "object", "properties": {"limit": {"type": "number"}}}),
     ]
 
 @server.call_tool()
@@ -203,7 +287,7 @@ async def handle_call_tool(name, arguments):
 
     try:
         if name == "get-customers-for-ads":
-            limit = int(arguments.get("limit", 50))
+            limit = min(int(arguments.get("limit", 50)), 250)
             customers = await find_customers(limit)
             result = [format_customer_for_ads(c) for c in customers]
             elapsed = int((time.time()-start)*1000)
@@ -213,9 +297,9 @@ async def handle_call_tool(name, arguments):
             return [types.TextContent(type="text", text=str(result))]
 
         elif name == "get-top-spenders":
-            limit = int(arguments.get("limit", 20))
+            limit = min(int(arguments.get("limit", 20)), 250)
             customers = await find_customers(250)
-            sorted_customers = sorted(customers, key=lambda c: float(getattr(c, 'total_spent', 0)), reverse=True)[:limit]
+            sorted_customers = sorted(customers, key=lambda c: safe_float(getattr(c, 'total_spent', 0)), reverse=True)[:limit]
             elapsed = int((time.time()-start)*1000)
             await log_to_mongo(session_id, ip_address, name, arguments, f"{len(sorted_customers)} top spenders returned", "success", None, elapsed)
             return [types.TextContent(type="text", text=str([format_customer_for_ads(c) for c in sorted_customers]))]
@@ -231,7 +315,7 @@ async def handle_call_tool(name, arguments):
             return [types.TextContent(type="text", text=str([format_customer_for_ads(c) for c in repeat]))]
 
         elif name == "get-new-customers":
-            limit = int(arguments.get("limit", 20))
+            limit = min(int(arguments.get("limit", 20)), 250)
             customers = await find_customers(limit)
             new = [c for c in customers if int(getattr(c, 'orders_count', 0)) == 1]
             elapsed = int((time.time()-start)*1000)
@@ -241,7 +325,7 @@ async def handle_call_tool(name, arguments):
             return [types.TextContent(type="text", text=str([format_customer_for_ads(c) for c in new]))]
 
         elif name == "get-abandoned-checkouts":
-            limit = int(arguments.get("limit", 20))
+            limit = min(int(arguments.get("limit", 20)), 250)
             abandoned = await find_checkouts(limit)
             elapsed = int((time.time()-start)*1000)
             await log_to_mongo(session_id, ip_address, name, arguments, f"{len(abandoned)} abandoned checkouts returned", "success", None, elapsed)
@@ -250,7 +334,7 @@ async def handle_call_tool(name, arguments):
             return [types.TextContent(type="text", text=str([format_abandoned(a) for a in abandoned]))]
 
         elif name == "get-non-buyers":
-            limit = int(arguments.get("limit", 20))
+            limit = min(int(arguments.get("limit", 20)), 250)
             customers = await find_customers(limit)
             non_buyers = [c for c in customers if int(getattr(c, 'orders_count', 0)) == 0]
             elapsed = int((time.time()-start)*1000)
@@ -261,6 +345,8 @@ async def handle_call_tool(name, arguments):
 
         elif name == "get-customer-orders":
             customer_id = arguments.get("customer_id")
+            if not customer_id:
+                return [types.TextContent(type="text", text="Error: customer_id is required")]
             orders = await find_customer_orders(customer_id)
             elapsed = int((time.time()-start)*1000)
             await log_to_mongo(session_id, ip_address, name, arguments, f"{len(orders)} orders returned", "success", None, elapsed)
@@ -269,7 +355,7 @@ async def handle_call_tool(name, arguments):
             return [types.TextContent(type="text", text=str([format_order(o) for o in orders]))]
 
         elif name == "get-all-orders":
-            limit = int(arguments.get("limit", 20))
+            limit = min(int(arguments.get("limit", 20)), 250)
             orders = await find_orders(limit)
             elapsed = int((time.time()-start)*1000)
             await log_to_mongo(session_id, ip_address, name, arguments, f"{len(orders)} orders returned", "success", None, elapsed)
@@ -280,7 +366,7 @@ async def handle_call_tool(name, arguments):
         elif name == "get-revenue-summary":
             customers = await find_customers(250)
             orders = await find_orders(250)
-            total_revenue = sum(float(o.total_price) for o in orders)
+            total_revenue = sum(safe_float(getattr(o, 'total_price', 0)) for o in orders)
             total_customers = len(customers)
             total_orders = len(orders)
             buyers = [c for c in customers if int(getattr(c, 'orders_count', 0)) > 0]
@@ -303,7 +389,7 @@ async def handle_call_tool(name, arguments):
             return [types.TextContent(type="text", text=summary)]
 
         elif name == "get-marketing-subscribers":
-            limit = int(arguments.get("limit", 50))
+            limit = min(int(arguments.get("limit", 50)), 250)
             customers = await find_customers(limit)
             subscribers = [c for c in customers if getattr(c, 'accepts_marketing', False) or getattr(c, 'email_marketing_consent', None)]
             elapsed = int((time.time()-start)*1000)
@@ -314,6 +400,8 @@ async def handle_call_tool(name, arguments):
 
         elif name == "get-customers-by-location":
             location_type = arguments.get("location_type", "country")
+            if location_type not in ["country", "city"]:
+                location_type = "country"
             customers = await find_customers(250)
             groups = {}
             for c in customers:
@@ -331,7 +419,7 @@ async def handle_call_tool(name, arguments):
             return [types.TextContent(type="text", text=result)]
 
         elif name == "get-product-list":
-            limit = int(arguments.get("limit", 10))
+            limit = min(int(arguments.get("limit", 10)), 250)
             products = await find_products(limit)
             elapsed = int((time.time()-start)*1000)
             await log_to_mongo(session_id, ip_address, name, arguments, f"{len(products)} products returned", "success", None, elapsed)
@@ -349,17 +437,18 @@ async def handle_call_tool(name, arguments):
         return [types.TextContent(type="text", text=f"Error: {str(e)}")]
 
 # ─── REST Endpoints ───────────────────────────────────────────────────
+async def rest_health(request: Request):
+    return JSONResponse(success_response({"status": "ok", "service": "neolook-shopify-mcp"}))
+
 async def rest_revenue(request: Request):
-    start = time.time()
-    logger.info(f"[REST] GET /revenue | ip={request.client.host}")
     try:
         customers = await find_customers(250)
         orders = await find_orders(250)
-        total_revenue = sum(float(o.total_price) for o in orders)
+        total_revenue = sum(safe_float(getattr(o, 'total_price', 0)) for o in orders)
         buyers = [c for c in customers if int(getattr(c, 'orders_count', 0)) > 0]
         repeat_buyers = [c for c in customers if int(getattr(c, 'orders_count', 0)) >= 2]
         marketing_opted = [c for c in customers if getattr(c, 'accepts_marketing', False) or getattr(c, 'email_marketing_consent', None)]
-        return JSONResponse({
+        return JSONResponse(success_response({
             "total_customers": len(customers),
             "total_orders": len(orders),
             "total_revenue": round(total_revenue, 2),
@@ -368,105 +457,78 @@ async def rest_revenue(request: Request):
             "repeat_buyers": len(repeat_buyers),
             "non_buyers": len(customers) - len(buyers),
             "marketing_subscribers": len(marketing_opted),
-        })
+        }))
     except Exception as e:
         logger.error(f"[REST] /revenue error: {e}")
-        return JSONResponse({"error": str(e)}, status_code=500)
+        return JSONResponse(error_response(str(e)), status_code=500)
 
 async def rest_customers(request: Request):
     try:
-        limit = int(request.query_params.get("limit", 50))
+        limit = min(int(request.query_params.get("limit", 50)), 250)
         customers = await find_customers(limit)
-        return JSONResponse({"count": len(customers), "customers": [format_customer_for_ads(c) for c in customers]})
+        return JSONResponse(success_response(
+            [format_customer_for_ads(c) for c in customers],
+            {"count": len(customers)}
+        ))
     except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+        return JSONResponse(error_response(str(e)), status_code=500)
 
 async def rest_orders(request: Request):
     try:
-        limit = int(request.query_params.get("limit", 20))
+        limit = min(int(request.query_params.get("limit", 20)), 250)
         orders = await find_orders(limit)
-        return JSONResponse({"count": len(orders), "orders": [format_order(o) for o in orders]})
+        return JSONResponse(success_response(
+            [format_order(o) for o in orders],
+            {"count": len(orders)}
+        ))
     except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+        return JSONResponse(error_response(str(e)), status_code=500)
 
 async def rest_abandoned(request: Request):
     try:
-        limit = int(request.query_params.get("limit", 20))
+        limit = min(int(request.query_params.get("limit", 20)), 250)
         abandoned = await find_checkouts(limit)
-        return JSONResponse({"count": len(abandoned), "abandoned_checkouts": [format_abandoned(a) for a in abandoned]})
+        return JSONResponse(success_response(
+            [format_abandoned(a) for a in abandoned],
+            {"count": len(abandoned)}
+        ))
     except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+        return JSONResponse(error_response(str(e)), status_code=500)
 
 async def rest_products(request: Request):
     try:
-        limit = int(request.query_params.get("limit", 20))
+        limit = min(int(request.query_params.get("limit", 20)), 250)
         products = await find_products(limit)
-        return JSONResponse({"count": len(products), "products": [{"id": p.id, "title": p.title, "price": p.variants[0].price if p.variants else 'N/A', "status": p.status} for p in products]})
+        return JSONResponse(success_response(
+            [{"id": p.id, "title": p.title, "price": safe_float(p.variants[0].price) if p.variants else 0, "status": p.status} for p in products],
+            {"count": len(products)}
+        ))
     except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+        return JSONResponse(error_response(str(e)), status_code=500)
 
 async def rest_top_spenders(request: Request):
     try:
-        limit = int(request.query_params.get("limit", 20))
+        limit = min(int(request.query_params.get("limit", 20)), 250)
         customers = await find_customers(250)
-        sorted_customers = sorted(customers, key=lambda c: float(getattr(c, 'total_spent', 0)), reverse=True)[:limit]
-        return JSONResponse({"count": len(sorted_customers), "top_spenders": [format_customer_for_ads(c) for c in sorted_customers]})
+        sorted_customers = sorted(customers, key=lambda c: safe_float(getattr(c, 'total_spent', 0)), reverse=True)[:limit]
+        return JSONResponse(success_response(
+            [format_customer_for_ads(c) for c in sorted_customers],
+            {"count": len(sorted_customers)}
+        ))
     except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+        return JSONResponse(error_response(str(e)), status_code=500)
 
 async def rest_subscribers(request: Request):
     try:
-        limit = int(request.query_params.get("limit", 50))
+        limit = min(int(request.query_params.get("limit", 50)), 250)
         customers = await find_customers(limit)
         subscribers = [c for c in customers if getattr(c, 'accepts_marketing', False) or getattr(c, 'email_marketing_consent', None)]
-        return JSONResponse({"count": len(subscribers), "subscribers": [format_customer_for_ads(c) for c in subscribers]})
+        return JSONResponse(success_response(
+            [format_customer_for_ads(c) for c in subscribers],
+            {"count": len(subscribers)}
+        ))
     except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-async def rest_health(request: Request):
-    return JSONResponse({"status": "ok", "service": "neolook-shopify-mcp"})
-
-async def rest_docs(request: Request):
-    from starlette.responses import HTMLResponse
-    html = """<!DOCTYPE html>
-    <html>
-    <head>
-        <title>Neolook Shopify API</title>
-        <meta charset="utf-8"/>
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <link rel="stylesheet" type="text/css" href="https://cdnjs.cloudflare.com/ajax/libs/swagger-ui/5.1.0/swagger-ui.css">
-    </head>
-    <body>
-    <div id="swagger-ui"></div>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/swagger-ui/5.1.0/swagger-ui-bundle.js"></script>
-    <script>
-    SwaggerUIBundle({
-        url: "/openapi.json",
-        dom_id: '#swagger-ui',
-        presets: [SwaggerUIBundle.presets.apis, SwaggerUIBundle.SwaggerUIStandalonePreset],
-        layout: "BaseLayout"
-    })
-    </script>
-    </body>
-    </html>"""
-    return HTMLResponse(html)
-
-async def rest_openapi(request: Request):
-    spec = {
-        "openapi": "3.0.0",
-        "info": {"title": "Neolook Shopify API", "version": "1.0.0", "description": "Shopify customer and order data API for Neolook ad targeting"},
-        "paths": {
-            "/health": {"get": {"summary": "Health check", "tags": ["System"], "responses": {"200": {"description": "OK"}}}},
-            "/revenue": {"get": {"summary": "Store revenue summary", "tags": ["Analytics"], "responses": {"200": {"description": "Revenue metrics"}}}},
-            "/customers": {"get": {"summary": "All customer profiles", "tags": ["Customers"], "parameters": [{"name": "limit", "in": "query", "schema": {"type": "integer", "default": 50}}], "responses": {"200": {"description": "Customer list"}}}},
-            "/customers/top-spenders": {"get": {"summary": "Top spenders", "tags": ["Customers"], "parameters": [{"name": "limit", "in": "query", "schema": {"type": "integer", "default": 20}}], "responses": {"200": {"description": "Top spenders"}}}},
-            "/customers/subscribers": {"get": {"summary": "Marketing subscribers", "tags": ["Customers"], "parameters": [{"name": "limit", "in": "query", "schema": {"type": "integer", "default": 50}}], "responses": {"200": {"description": "Subscribers"}}}},
-            "/orders": {"get": {"summary": "All store orders", "tags": ["Orders"], "parameters": [{"name": "limit", "in": "query", "schema": {"type": "integer", "default": 20}}], "responses": {"200": {"description": "Orders"}}}},
-            "/abandoned": {"get": {"summary": "Abandoned checkouts", "tags": ["Orders"], "parameters": [{"name": "limit", "in": "query", "schema": {"type": "integer", "default": 20}}], "responses": {"200": {"description": "Abandoned checkouts"}}}},
-            "/products": {"get": {"summary": "Product list", "tags": ["Products"], "parameters": [{"name": "limit", "in": "query", "schema": {"type": "integer", "default": 20}}], "responses": {"200": {"description": "Products"}}}},
-        }
-    }
-    return JSONResponse(spec)
+        return JSONResponse(error_response(str(e)), status_code=500)
 
 # ─── SSE Server ───────────────────────────────────────────────────────
 def run_sse_server():
@@ -507,12 +569,10 @@ def run_sse_server():
         Route("/orders", endpoint=rest_orders),
         Route("/abandoned", endpoint=rest_abandoned),
         Route("/products", endpoint=rest_products),
-        Route("/docs", endpoint=rest_docs),
-        Route("/openapi.json", endpoint=rest_openapi),
     ])
 
     port = int(os.getenv("PORT", 8000))
-    logger.info(f"✅ Neolook Shopify API starting on port {port}")
+    logger.info(f"✅ Neolook Shopify MCP Server running on port {port}")
     uvicorn.run(app, host="0.0.0.0", port=port)
 
 async def run_stdio_server():

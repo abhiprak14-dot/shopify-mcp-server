@@ -1,7 +1,7 @@
 [project]
 name = "shopify-mcp-server"
-version = "0.1.0"
-description = "Add your description here"
+version = "1.0.0"
+description = "Neolook Shopify MCP Server"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
@@ -9,6 +9,10 @@ dependencies = [
     "mcp[cli]>=1.2.0",
     "ShopifyAPI>=12.7.0",
     "python-dotenv>=1.0.0",
+    "uvicorn>=0.46.0",
+    "starlette>=1.0.0",
+    "pymongo>=4.0.0",
+    "cachetools>=5.0.0",
 ]
 
 [build-system]
